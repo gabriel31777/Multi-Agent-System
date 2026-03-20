@@ -79,13 +79,23 @@ class BaseRobotAgent(Agent):
         return actions.idle()
 
     @staticmethod
+    def _free_allowed_moves(knowledge: dict) -> list[tuple[int, int]]:
+        visible_tiles = knowledge.get("visible_tiles", {})
+        free_moves = []
+        for pos in knowledge.get("allowed_moves", []):
+            tile = visible_tiles.get(pos)
+            if tile is None or not tile.get("robots"):
+                free_moves.append(pos)
+        return free_moves
+
+    @staticmethod
     def _action_towards(knowledge: dict, target: tuple[int, int] | None) -> dict:
         if target is None:
             return actions.idle()
         pos = knowledge["pos"]
         if pos == target:
             return actions.idle()
-        candidates = knowledge["allowed_moves"]
+        candidates = BaseRobotAgent._free_allowed_moves(knowledge)
         if not candidates:
             return actions.idle()
         best = min(
@@ -115,16 +125,26 @@ class GreenRobotAgent(BaseRobotAgent):
         carrying = knowledge["carrying_types"]
         visible = knowledge["visible_waste_positions"]
         east_drop = knowledge["east_targets"]["z1"]
+        same_cell = knowledge["current_tile_wastes"]
 
         if len(carrying) == 1 and carrying[0] == "yellow":
             if pos == east_drop:
                 return actions.drop()
             return BaseRobotAgent._action_towards(knowledge, east_drop)
 
+        # After dropping yellow at the handoff point, vacate this cell so yellow robots can enter.
+        if pos == east_drop and not carrying:
+            yellow_here = [w for w in same_cell if w["waste_type"] == "yellow"]
+            if yellow_here:
+                retreat_target = (max(0, pos[0] - 1), pos[1])
+                retreat_action = BaseRobotAgent._action_towards(knowledge, retreat_target)
+                if retreat_action["type"] != "idle":
+                    return retreat_action
+                return BaseRobotAgent._action_towards(knowledge, knowledge["random_move"])
+
         if len(carrying) >= 2 and all(t == "green" for t in carrying):
             return actions.transform()
 
-        same_cell = knowledge["current_tile_wastes"]
         green_here = [w for w in same_cell if w["waste_type"] == "green"]
         if green_here and len(carrying) < 2:
             return actions.pick_waste(green_here[0]["id"])

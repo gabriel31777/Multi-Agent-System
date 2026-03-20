@@ -98,6 +98,21 @@ class RobotMissionModel(Model):
         xmin, xmax = self.zone_boundaries[zone]
         return (self.random.randint(xmin, xmax), self.random.randrange(self.height))
 
+    def _is_robot_cell_free(self, pos: tuple[int, int], ignore_agent=None) -> bool:
+        for item in self.grid.get_cell_list_contents([pos]):
+            if hasattr(item, "robot_type") and item is not ignore_agent:
+                return False
+        return True
+
+    def _random_free_pos_in_zone(self, zone: str) -> tuple[int, int] | None:
+        xmin, xmax = self.zone_boundaries[zone]
+        candidates = [(x, y) for x in range(xmin, xmax + 1) for y in range(self.height)]
+        self.random.shuffle(candidates)
+        for pos in candidates:
+            if self._is_robot_cell_free(pos):
+                return pos
+        return None
+
     def _create_initial_wastes(self, n_green_waste: int):
         for _ in range(n_green_waste):
             waste = Waste(self, waste_type="green")
@@ -112,7 +127,12 @@ class RobotMissionModel(Model):
         for cls, total, start_zone in robot_specs:
             for _ in range(total):
                 agent = cls(self)
-                self.grid.place_agent(agent, self._random_pos_in_zone(start_zone))
+                pos = self._random_free_pos_in_zone(start_zone)
+                if pos is None:
+                    raise ValueError(
+                        f"No free cell available to place robot '{cls.__name__}' in zone '{start_zone}'."
+                    )
+                self.grid.place_agent(agent, pos)
 
     def _record_visit(self, pos: tuple[int, int] | None):
         if pos is None:
@@ -209,7 +229,8 @@ class RobotMissionModel(Model):
                 visible_waste_positions[waste.waste_type].append(waste.pos)
 
         allowed_moves = self.get_accessible_neighborhood(agent)
-        random_move = self.random.choice(allowed_moves) if allowed_moves else current_pos
+        free_moves = [pos for pos in allowed_moves if self._is_robot_cell_free(pos, ignore_agent=agent)]
+        random_move = self.random.choice(free_moves) if free_moves else current_pos
         return {
             "visible_tiles": visible_tiles,
             "current_tile_wastes": visible_tiles[current_pos]["wastes"],
@@ -233,7 +254,9 @@ class RobotMissionModel(Model):
 
         if action_type == "move":
             destination = tuple(action["destination"])
-            if destination in self.get_accessible_neighborhood(agent):
+            if destination in self.get_accessible_neighborhood(agent) and self._is_robot_cell_free(
+                destination, ignore_agent=agent
+            ):
                 old_pos = agent.pos
                 self.grid.move_agent(agent, destination)
                 self.total_distance += abs(destination[0] - old_pos[0]) + abs(destination[1] - old_pos[1])
