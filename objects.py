@@ -36,6 +36,7 @@ class Waste(Agent):
     def __init__(self, model, waste_type: str):
         super().__init__(model)
         self.waste_type = waste_type
+        self.orphan = False
 
     def step(self):
         return None

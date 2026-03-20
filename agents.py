@@ -100,6 +100,28 @@ class BaseRobotAgent(Agent):
             return None
         return min(positions, key=lambda p: abs(p[0] - pos[0]) + abs(p[1] - pos[1]))
 
+    @staticmethod
+    def _get_fallback_target(knowledge: dict, targets: list[tuple[int, int]]) -> tuple[int, int]:
+        pos = knowledge["pos"]
+        target_x = targets[0][0]
+        closest = min(targets, key=lambda p: abs(p[0]-pos[0]) + abs(p[1]-pos[1]))
+        
+        if pos[0] < target_x:
+            return closest
+            
+        recent_pos = {step["pos"] for step in knowledge["history"]}
+        recent_pos.add(pos)
+        
+        unvisited = [p for p in targets if p not in recent_pos]
+        if unvisited:
+            return min(unvisited, key=lambda p: abs(p[0]-pos[0]) + abs(p[1]-pos[1]))
+            
+        others = [p for p in targets if p != pos]
+        if others:
+            return min(others, key=lambda p: abs(p[0]-pos[0]) + abs(p[1]-pos[1]))
+            
+        return closest
+
 
 class GreenRobotAgent(BaseRobotAgent):
     robot_type = "green"
@@ -114,26 +136,43 @@ class GreenRobotAgent(BaseRobotAgent):
         pos = knowledge["pos"]
         carrying = knowledge["carrying_types"]
         visible = knowledge["visible_waste_positions"]
-        east_drop = knowledge["east_targets"]["z1"]
+        orphans = knowledge.get("orphan_waste_positions", {})
+        east_targets = knowledge["east_targets"]["z1"]
+
+        target_greens = list(visible.get("green", []))
+        orphan_greens = list(orphans.get("green", []))
+        can_pick_orphans = len(carrying) == 1 or (len(carrying) == 0 and len(target_greens) + len(orphan_greens) >= 2)
+        if can_pick_orphans:
+            target_greens.extend(orphan_greens)
 
         if len(carrying) == 1 and carrying[0] == "yellow":
-            if pos == east_drop:
+            if pos in east_targets:
                 return actions.drop()
-            return BaseRobotAgent._action_towards(knowledge, east_drop)
+            target_drop = min(east_targets, key=lambda p: abs(p[0]-pos[0]) + abs(p[1]-pos[1]))
+            return BaseRobotAgent._action_towards(knowledge, target_drop)
+
+        if len(carrying) == 1 and carrying[0] == "green" and not target_greens:
+            if pos in east_targets:
+                return {"type": "drop", "kwargs": {"orphan": True}}
+            target_drop = min(east_targets, key=lambda p: abs(p[0]-pos[0]) + abs(p[1]-pos[1]))
+            return BaseRobotAgent._action_towards(knowledge, target_drop)
 
         if len(carrying) >= 2 and all(t == "green" for t in carrying):
             return actions.transform()
 
         same_cell = knowledge["current_tile_wastes"]
         green_here = [w for w in same_cell if w["waste_type"] == "green"]
+        if green_here:
+            if not can_pick_orphans:
+                green_here = [w for w in green_here if not w.get("orphan")]
         if green_here and len(carrying) < 2:
             return actions.pick_waste(green_here[0]["id"])
 
-        target = BaseRobotAgent._nearest_target(pos, visible["green"])
+        target = BaseRobotAgent._nearest_target(pos, target_greens)
         if target is not None:
             return BaseRobotAgent._action_towards(knowledge, target)
 
-        frontier = east_drop if pos[0] < east_drop[0] else knowledge["random_move"]
+        frontier = BaseRobotAgent._get_fallback_target(knowledge, east_targets)
         return BaseRobotAgent._action_towards(knowledge, frontier)
 
 
@@ -150,26 +189,43 @@ class YellowRobotAgent(BaseRobotAgent):
         pos = knowledge["pos"]
         carrying = knowledge["carrying_types"]
         visible = knowledge["visible_waste_positions"]
-        east_drop = knowledge["east_targets"]["z2"]
+        orphans = knowledge.get("orphan_waste_positions", {})
+        east_targets = knowledge["east_targets"]["z2"]
+
+        target_yellows = list(visible.get("yellow", []))
+        orphan_yellows = list(orphans.get("yellow", []))
+        can_pick_orphans = len(carrying) == 1 or (len(carrying) == 0 and len(target_yellows) + len(orphan_yellows) >= 2)
+        if can_pick_orphans:
+            target_yellows.extend(orphan_yellows)
 
         if len(carrying) == 1 and carrying[0] == "red":
-            if pos == east_drop:
+            if pos in east_targets:
                 return actions.drop()
-            return BaseRobotAgent._action_towards(knowledge, east_drop)
+            target_drop = min(east_targets, key=lambda p: abs(p[0]-pos[0]) + abs(p[1]-pos[1]))
+            return BaseRobotAgent._action_towards(knowledge, target_drop)
+
+        if len(carrying) == 1 and carrying[0] == "yellow" and not target_yellows:
+            if pos in east_targets:
+                return {"type": "drop", "kwargs": {"orphan": True}}
+            target_drop = min(east_targets, key=lambda p: abs(p[0]-pos[0]) + abs(p[1]-pos[1]))
+            return BaseRobotAgent._action_towards(knowledge, target_drop)
 
         if len(carrying) >= 2 and all(t == "yellow" for t in carrying):
             return actions.transform()
 
         same_cell = knowledge["current_tile_wastes"]
         yellow_here = [w for w in same_cell if w["waste_type"] == "yellow"]
+        if yellow_here:
+            if not can_pick_orphans:
+                yellow_here = [w for w in yellow_here if not w.get("orphan")]
         if yellow_here and len(carrying) < 2:
             return actions.pick_waste(yellow_here[0]["id"])
 
-        target = BaseRobotAgent._nearest_target(pos, visible["yellow"])
+        target = BaseRobotAgent._nearest_target(pos, target_yellows)
         if target is not None:
             return BaseRobotAgent._action_towards(knowledge, target)
 
-        frontier = east_drop if pos[0] < east_drop[0] else knowledge["random_move"]
+        frontier = BaseRobotAgent._get_fallback_target(knowledge, east_targets)
         return BaseRobotAgent._action_towards(knowledge, frontier)
 
 

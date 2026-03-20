@@ -67,9 +67,9 @@ class RobotMissionModel(Model):
             "z3": (z2_end + 1, self.width - 1),
         }
 
-    def _build_east_targets(self) -> dict[str, tuple[int, int]]:
+    def _build_east_targets(self) -> dict[str, list[tuple[int, int]]]:
         return {
-            zone: (xmax, self.height // 2)
+            zone: [(xmax, y) for y in range(self.height)]
             for zone, (_, xmax) in self.zone_boundaries.items()
         }
 
@@ -189,7 +189,7 @@ class RobotMissionModel(Model):
             "zone": radio.zone if radio else self.zone_for_pos(pos),
             "radioactivity": getattr(radio, "level", None),
             "robots": robots,
-            "wastes": [{"id": w.unique_id, "waste_type": w.waste_type} for w in wastes],
+            "wastes": [{"id": w.unique_id, "waste_type": w.waste_type, "orphan": getattr(w, "orphan", False)} for w in wastes],
             "disposal": disposal,
         }
 
@@ -204,9 +204,13 @@ class RobotMissionModel(Model):
             visible_tiles[pos] = self._serialize_cell(pos)
 
         visible_waste_positions = {"green": [], "yellow": [], "red": []}
+        orphan_waste_positions = {"green": [], "yellow": [], "red": []}
         for waste in self.waste_agents():
             if self.zone_for_pos(waste.pos) in agent.allowed_zones:
-                visible_waste_positions[waste.waste_type].append(waste.pos)
+                if getattr(waste, "orphan", False):
+                    orphan_waste_positions[waste.waste_type].append(waste.pos)
+                else:
+                    visible_waste_positions[waste.waste_type].append(waste.pos)
 
         allowed_moves = self.get_accessible_neighborhood(agent)
         random_move = self.random.choice(allowed_moves) if allowed_moves else current_pos
@@ -214,6 +218,7 @@ class RobotMissionModel(Model):
             "visible_tiles": visible_tiles,
             "current_tile_wastes": visible_tiles[current_pos]["wastes"],
             "visible_waste_positions": visible_waste_positions,
+            "orphan_waste_positions": orphan_waste_positions,
             "allowed_moves": allowed_moves,
             "random_move": random_move,
             "disposal_pos": self.disposal_pos,
@@ -258,7 +263,10 @@ class RobotMissionModel(Model):
         elif action_type == "drop":
             if len(agent.carrying) == 1:
                 waste_type = agent.carrying.pop()
-                self.grid.place_agent(Waste(self, waste_type=waste_type), agent.pos)
+                w = Waste(self, waste_type=waste_type)
+                if action.get("kwargs", {}).get("orphan"):
+                    w.orphan = True
+                self.grid.place_agent(w, agent.pos)
 
         elif action_type == "dispose":
             if agent.pos == self.disposal_pos and len(agent.carrying) == 1 and agent.carrying[0] == "red":
