@@ -45,13 +45,16 @@ class RobotMissionModel(Model):
         self.max_steps = max_steps
         self.running = True
         self.disposed_waste = 0
+        self.total_distance = 0
         self.disposal_pos = None
         self.zone_boundaries = self._build_zones()
         self.east_targets = self._build_east_targets()
+        self.visit_counts = [[0 for _ in range(self.width)] for _ in range(self.height)]
 
         self._create_environment()
         self._create_initial_wastes(initial_green_waste)
         self._create_robots(n_green_robots, n_yellow_robots, n_red_robots)
+        self._record_robot_visits()
         self.datacollector = self._build_datacollector()
         self.datacollector.collect(self)
 
@@ -111,6 +114,17 @@ class RobotMissionModel(Model):
                 agent = cls(self)
                 self.grid.place_agent(agent, self._random_pos_in_zone(start_zone))
 
+    def _record_visit(self, pos: tuple[int, int] | None):
+        if pos is None:
+            return
+        x, y = pos
+        if 0 <= x < self.width and 0 <= y < self.height:
+            self.visit_counts[y][x] += 1
+
+    def _record_robot_visits(self):
+        for robot in self.robot_agents():
+            self._record_visit(getattr(robot, "pos", None))
+
     def _build_datacollector(self) -> DataCollector:
         return DataCollector(
             model_reporters={
@@ -118,6 +132,9 @@ class RobotMissionModel(Model):
                 "Yellow waste": lambda m: m.count_waste("yellow"),
                 "Red waste": lambda m: m.count_waste("red"),
                 "Disposed waste": lambda m: m.disposed_waste,
+                "Remaining waste": lambda m: m.count_remaining_waste(),
+                "Total distance": lambda m: m.total_distance,
+                "Efficiency": lambda m: m.efficiency(),
                 "Active robots": lambda m: m.count_robots(),
                 "Average cargo": lambda m: m.average_cargo(),
             },
@@ -145,6 +162,22 @@ class RobotMissionModel(Model):
         if not robots:
             return 0.0
         return sum(len(r.carrying) for r in robots) / len(robots)
+
+    def count_remaining_waste(self) -> int:
+        """
+        Counts all waste items that still exist in the system:
+        - waste agents currently on the grid
+        - waste units currently being carried by robots
+        """
+        grid_waste = len(self.waste_agents())
+        carried_waste = sum(len(robot.carrying) for robot in self.robot_agents())
+        return grid_waste + carried_waste
+
+    def efficiency(self) -> float:
+        """Disposed waste per unit of travelled distance."""
+        if self.total_distance == 0:
+            return 0.0
+        return self.disposed_waste / self.total_distance
 
     def _serialize_cell(self, pos: tuple[int, int]) -> dict:
         contents = self.grid.get_cell_list_contents([pos])
@@ -201,7 +234,9 @@ class RobotMissionModel(Model):
         if action_type == "move":
             destination = tuple(action["destination"])
             if destination in self.get_accessible_neighborhood(agent):
+                old_pos = agent.pos
                 self.grid.move_agent(agent, destination)
+                self.total_distance += abs(destination[0] - old_pos[0]) + abs(destination[1] - old_pos[1])
 
         elif action_type == "pick":
             if len(agent.carrying) < agent.carry_capacity:
@@ -234,6 +269,7 @@ class RobotMissionModel(Model):
 
     def step(self):
         self.agents.shuffle_do("step")
+        self._record_robot_visits()
         self.datacollector.collect(self)
         if self.steps >= self.max_steps or (self.count_waste("green") == 0 and self.count_waste("yellow") == 0 and self.count_waste("red") == 0 and all(len(r.carrying) == 0 for r in self.robot_agents())):
             self.running = False

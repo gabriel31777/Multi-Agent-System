@@ -13,7 +13,7 @@ from __future__ import annotations
 import solara
 from matplotlib.figure import Figure
 from matplotlib.patches import Rectangle
-from mesa.visualization import SolaraViz, make_plot_component, make_space_component
+from mesa.visualization import SolaraViz
 from mesa.visualization.utils import update_counter
 
 # Handle both package imports and direct execution
@@ -38,8 +38,58 @@ def agent_portrayal(agent):
     if isinstance(agent, Waste):
         return {"color": WASTE_COLORS[agent.waste_type], "size": 28, "marker": "D"}
     if hasattr(agent, "robot_type"):
-        return {"color": ROBOT_COLORS[agent.robot_type], "size": 70, "marker": "o"}
+        robot_color = ROBOT_COLORS[agent.robot_type]
+        carrying = getattr(agent, "carrying", [])
+
+        if carrying:
+            carried_item = carrying[0]
+            carried_type = getattr(carried_item, "waste_type", None)
+            carried_color = WASTE_COLORS.get(carried_type, robot_color)
+
+            return {
+                "color": carried_color,
+                "size": 120,
+                "marker": "H",
+                "edgecolors": robot_color,
+                "linewidths": 2.2,
+            }
+
+        return {
+            "color": robot_color,
+            "size": 70,
+            "marker": "o",
+            "edgecolors": "black",
+            "linewidths": 0.8,
+        }
     return {"color": "black", "size": 20}
+
+
+# MetricsSummary component
+@solara.component
+def MetricsSummary(model):
+    update_counter.get()
+
+    current_step = getattr(model, "steps", 0)
+    remaining_waste = model.count_remaining_waste()
+    disposed_waste = model.disposed_waste
+    total_distance = model.total_distance
+    efficiency = model.efficiency()
+
+    with solara.Column():
+        with solara.Columns([1, 1]):
+            with solara.Card("Remaining waste"):
+                solara.Markdown(f"## {remaining_waste}")
+            with solara.Card("Efficiency"):
+                #solara.Text("Disposed waste per unit of travelled distance")
+                solara.Markdown(f"## {efficiency:.3f}")
+
+        with solara.Columns([1, 1]):
+            with solara.Card("Disposed waste"):
+                solara.Markdown(f"## {disposed_waste}")
+
+            with solara.Card("Total distance"):
+                solara.Markdown(f"## {total_distance}")
+            
 
 @solara.component
 def GridZones(model):
@@ -81,8 +131,8 @@ def GridZones(model):
             s=portrayal.get("size", 80),
             c=portrayal.get("color", "blue"),
             marker=portrayal.get("marker", "o"),
-            edgecolors="black",
-            linewidths=0.8,
+            edgecolors=portrayal.get("edgecolors", "black"),
+            linewidths=portrayal.get("linewidths", 0.8),
             zorder=10,
         )
 
@@ -125,6 +175,68 @@ def WastePlot(model):
     solara.FigureMatplotlib(fig)
 
 @solara.component
+def DistancePlot(model):
+    update_counter.get()
+
+    df = model.datacollector.get_model_vars_dataframe()
+
+    fig = Figure(figsize=(8, 5))
+    ax = fig.subplots()
+
+    if not df.empty and "Total distance" in df.columns:
+        ax.plot(df.index, df["Total distance"], label="Total distance", color="black")
+
+    ax.set_title("Total distance over time")
+    ax.set_xlabel("Step")
+    ax.set_ylabel("Distance")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+
+    solara.FigureMatplotlib(fig)
+
+
+@solara.component
+def EfficiencyPlot(model):
+    update_counter.get()
+
+    df = model.datacollector.get_model_vars_dataframe()
+
+    fig = Figure(figsize=(8, 5))
+    ax = fig.subplots()
+
+    if not df.empty and "Efficiency" in df.columns:
+        ax.plot(df.index, df["Efficiency"], label="Efficiency", color="#1f77b4")
+
+    ax.set_title("Efficiency over time")
+    ax.set_xlabel("Step")
+    ax.set_ylabel("Disposed waste / distance")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+
+    solara.FigureMatplotlib(fig)
+
+
+@solara.component
+def RobotVisitsHeatmap(model):
+    update_counter.get()
+
+    fig = Figure(figsize=(8, 5))
+    ax = fig.subplots()
+
+    visit_counts = getattr(
+        model,
+        "visit_counts",
+        [[0 for _ in range(model.grid.width)] for _ in range(model.grid.height)],
+    )
+    heatmap = ax.imshow(visit_counts, origin="lower", aspect="auto", cmap="Blues")
+    ax.set_title("Robot visits heatmap")
+    ax.set_xlabel("X")
+    ax.set_ylabel("Y")
+    fig.colorbar(heatmap, ax=ax, label="Visits")
+
+    solara.FigureMatplotlib(fig)
+
+@solara.component
 
 def MissionHistogram(model):
     update_counter.get()
@@ -135,7 +247,6 @@ def MissionHistogram(model):
     ax.set_xlabel("Cargo carried by robots")
     ax.set_ylabel("Number of robots")
     solara.FigureMatplotlib(fig)
-
 
 model_params = {
     "width": {
@@ -194,9 +305,16 @@ SpaceGraph = GridZones
 
 page = SolaraViz(
     model,
-    components=[SpaceGraph, WastePlot, MissionHistogram],
+    components=[
+        (MetricsSummary, 0),
+        (GridZones, 0),
+        (WastePlot, 0),
+        (MissionHistogram, 0),
+        (GridZones, 1),
+        (DistancePlot, 1),
+        (EfficiencyPlot, 1),
+        (RobotVisitsHeatmap, 1),
+    ],
     model_params=model_params,
     name="Robot Mission MAS 2026",
 )
-
-page

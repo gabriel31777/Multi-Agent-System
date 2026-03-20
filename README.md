@@ -29,7 +29,7 @@ python -m robot_mission_mas2026.run
 ### 2. Visualization with Solara
 
 ```bash
-solara run robot_mission_mas2026/server.py
+solara run server.py
 ```
 
 ## Points already prepared for extension
