@@ -98,10 +98,18 @@ class RobotMissionModel(Model):
         xmin, xmax = self.zone_boundaries[zone]
         return (self.random.randint(xmin, xmax), self.random.randrange(self.height))
 
-    def _create_initial_wastes(self, n_green_waste: int):
+    def _create_initial_wastes(self, n_green_waste: int, n_yellow_waste: int, n_red_waste: int):
         for _ in range(n_green_waste):
             waste = Waste(self, waste_type="green")
             self.grid.place_agent(waste, self._random_pos_in_zone("z1"))
+
+        for _ in range(n_yellow_waste):
+            waste = Waste(self, waste_type="yellow")
+            self.grid.place_agent(waste, self._random_pos_in_zone("z2"))
+        
+        for _ in range(n_red_waste):
+            waste = Waste(self, waste_type="red")
+            self.grid.place_agent(waste, self._random_pos_in_zone("z3"))
 
     def _create_robots(self, n_green: int, n_yellow: int, n_red: int):
         robot_specs = [
