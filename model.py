@@ -35,6 +35,8 @@ class RobotMissionModel(Model):
         n_yellow_robots: int = DEFAULT_PARAMS["n_yellow_robots"],
         n_red_robots: int = DEFAULT_PARAMS["n_red_robots"],
         initial_green_waste: int = DEFAULT_PARAMS["initial_green_waste"],
+        initial_yellow_waste: int = DEFAULT_PARAMS["initial_yellow_waste"],
+        initial_red_waste: int = DEFAULT_PARAMS["initial_red_waste"],
         max_steps: int = DEFAULT_PARAMS["max_steps"],
         seed: int | None = None,
     ):
@@ -52,7 +54,7 @@ class RobotMissionModel(Model):
         self.visit_counts = [[0 for _ in range(self.width)] for _ in range(self.height)]
 
         self._create_environment()
-        self._create_initial_wastes(initial_green_waste)
+        self._create_initial_wastes(initial_green_waste, initial_yellow_waste, initial_red_waste)
         self._create_robots(n_green_robots, n_yellow_robots, n_red_robots)
         self._record_robot_visits()
         self.datacollector = self._build_datacollector()
