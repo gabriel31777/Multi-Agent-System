@@ -1,0 +1,14 @@
+name: project-mas-env
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - mesa=3.3.0
+  - numpy
+  - seaborn
+  - matplotlib
+  - altair
+  - solara
+  - networkx
+  - pip
