@@ -15,6 +15,8 @@ DEFAULT_PARAMS = {
     "n_yellow_robots": 3,
     "n_red_robots": 2,
     "initial_green_waste": 24,
+    "initial_yellow_waste": 12,
+    "initial_red_waste": 12,
     "max_steps": 300,
 }
 
