@@ -46,11 +46,24 @@ Waste is created at start and placed randomly within its matching zone:
 
 All robots share the same **perception → deliberation → action** loop defined in `BaseRobotAgent.step_agent()`. Each step, a robot:
 1. Receives **percepts** from the model (visible tiles, waste positions, allowed moves).
-2. Updates its **knowledge** dictionary (includes a 25-step positional history and a full memory map of seen tiles).
+2. Updates its **knowledge** dictionary (includes a 25-step positional history and a persistent memory map of seen tiles).
 3. Runs **`deliberate(knowledge)`** to choose an action.
 4. Sends the action to the model via **`do()`** and stores the returned percepts.
 
-Movement always uses **Manhattan-distance minimisation** over robot-free neighbouring cells. A robot will `idle` if all neighbours are blocked.
+### Perception and movement model
+
+- **Limited field of view:** the robot only perceives its own cell + immediate neighbourhood (`Moore`, radius 1), filtered by allowed zones.
+- **Local motion:** each move is to one neighbouring cell only (including diagonals), always avoiding occupied robot cells.
+- **Target following:** movement towards a target uses Manhattan-distance minimization over free neighbouring cells.
+- **Memory use:** although perception is local, robots keep a persistent map (`knowledge["memory"]`) of previously seen tiles/waste.
+
+### Zig-zag patrol (lawnmower)
+
+When no actionable waste target is available, robots patrol using a precomputed `patrol_path`:
+- Built once per robot from allowed zone boundaries.
+- X waypoints advance with stride 3 (`min_x + 1, min_x + 4, ...`) and may append `max_x - 1`.
+- For each waypoint column, Y alternates between top and bottom (`0 ↔ ymax`), creating a **zig-zag vertical sweep**.
+- The path is rotated so each robot starts from the closest waypoint to its initial position.
 
 ---
 
@@ -58,24 +71,15 @@ Movement always uses **Manhattan-distance minimisation** over robot-free neighbo
 
 **Zone:** `z1` only | **Collects:** green waste | **Produces:** yellow waste | **Capacity:** 2
 
-#### Normal collection cycle
+#### Decision flow
 
-1. **Explore.** If carrying nothing and green waste is visible, move towards the nearest one (Manhattan distance).
-2. **Pick.** When on the same cell as a green waste item, pick it up.
-3. **Pair.** Collect a second green waste item.
-4. **Transform.** With 2 greens in cargo, immediately execute `transform` → cargo becomes 1 yellow.
-5. **Deliver.** Move eastward to the **z1 east border** (column 4, any row). Choose the nearest border cell.
-6. **Drop.** Drop the yellow waste at the border cell.
-7. **Vacate.** If the border cell now contains yellow waste but the robot is empty, retreat one step west (or to a random free cell) so that yellow robots can access the drop point.
-8. **Repeat.**
-
-#### Fallback exploration
-
-When no green waste is visible and the robot is empty, it uses `_get_fallback_target` to walk towards the east border:
-- If the robot is already west of the border, move directly to the nearest unvisited border cell.
-- Otherwise, prefer border cells not seen in the last 25 steps; fall back to the nearest non-current border cell.
-
-This keeps robots sweeping the zone rather than clustering in one spot.
+1. If carrying a **yellow** item, deliver to nearest `z1` east target and `drop`.
+2. If carrying one **green** and no reachable green target remains, execute `transform_orphan` (green → yellow).
+3. If carrying 2 greens, execute `transform` (2 green → 1 yellow).
+4. If standing on green waste and has capacity, `pick`.
+5. Otherwise, move to nearest known green target.
+6. If no target exists, follow zig-zag patrol (`goal_type="patrol"`).
+7. Extra handoff behavior: after dropping yellow on `z1` east border and becoming empty, retreat west/random free move to avoid blocking yellow robots.
 
 ---
 
@@ -83,21 +87,16 @@ This keeps robots sweeping the zone rather than clustering in one spot.
 
 **Zones:** `z1` and `z2` | **Collects:** yellow waste | **Produces:** red waste | **Capacity:** 2
 
-#### Normal collection cycle
+#### Decision flow
 
-1. **Explore** `z1` and `z2` for yellow waste, moving towards the nearest item.
-2. **Pick** a yellow waste unit on the current cell.
-3. **Pair.** Collect a second yellow waste unit.
-4. **Transform.** With 2 yellows in cargo, execute `transform` → cargo becomes 1 red.
-5. **Deliver.** Move eastward to the **z2 east border** (column 9, any row).
-6. **Drop** the red waste at the border cell.
-7. **Repeat.**
+1. If carrying a **red** item, deliver to nearest `z2` east target and `drop`.
+2. If carrying one **yellow** and no yellow target remains, execute `transform_orphan` (yellow → red).
+3. If carrying 2 yellows, execute `transform` (2 yellow → 1 red).
+4. If standing on yellow waste and has capacity, `pick`.
+5. Otherwise, move to nearest known yellow target.
+6. If no target exists, follow zig-zag patrol (`goal_type="patrol"`).
 
-Yellow robots may enter `z1` to collect yellow waste dropped there by green robots after their delivery step.
-
-#### Fallback exploration
-
-Same logic as green robots, but targeting the z2 east border cells.
+Yellow robots can enter `z1` to collect yellow waste produced by green robots at the `z1`/`z2` handoff.
 
 ---
 
@@ -105,13 +104,14 @@ Same logic as green robots, but targeting the z2 east border cells.
 
 **Zones:** `z1`, `z2`, `z3` (all zones) | **Collects:** red waste | **No transformation** | **Capacity:** 1
 
-#### Cycle
+#### Decision flow
 
-1. **Search.** Move towards the nearest visible red waste across all zones.
-2. **Pick** a red waste unit on the current cell (capacity = 1).
-3. **Deliver.** Move directly to the disposal position (rightmost column, fixed row).
-4. **Dispose.** When standing on the disposal cell, execute `dispose` → waste count increments and cargo clears.
-5. **Repeat.** If no red waste is visible, move to a random free neighbouring cell to continue searching.
+1. If carrying one red item:
+   - at disposal zone: `dispose`;
+   - otherwise: move toward disposal position.
+2. If on a red waste cell and empty, `pick`.
+3. Else move to nearest known red target.
+4. If no target exists, use zig-zag patrol (not random walk).
 
 ---
 
@@ -148,6 +148,20 @@ An earlier design dropped the lone item at the zone border with an `orphan` flag
 
 ---
 
+## Visualization of Trajectories and Goals
+
+In `server.py`, `GridZones` renders extra robot-intent overlays from each robot's knowledge:
+- **Waste memory links:** dotted line from robot to remembered waste targets (including orphans of its own collectible type).
+- **Planned objective trajectory:** solid magenta line from robot to `current_goal` when goal type is an objective.
+- **Patrol trajectory:** dashed blue line from robot to `current_goal` when goal type is patrol.
+
+The sidebar has per-type toggles:
+- `Green Trajectories`
+- `Yellow Trajectories`
+- `Red Trajectories`
+
+---
+
 ## How to Run
 
 ### Headless simulation
@@ -157,12 +171,78 @@ conda activate project-mas-env
 python run.py
 ```
 
+You can also run a single custom scenario directly from CLI:
+
+```bash
+python run.py \
+  --width 30 --height 20 \
+  --n-green-robots 8 --n-yellow-robots 6 --n-red-robots 4 \
+  --initial-green-waste 80 --initial-yellow-waste 40 --initial-red-waste 20 \
+  --max-steps 1200 \
+  --seed 42
+```
+
 ### Interactive visualization (Solara)
 
 ```bash
 conda activate project-mas-env
 solara run server.py
 ```
+
+### Benchmark sweep (without Solara server)
+
+`run.py` also supports combinatorial benchmarks with repetitions:
+
+```bash
+python run.py --benchmark \
+  --widths 15,30 \
+  --heights 10,20 \
+  --green-robots 4,8 \
+  --yellow-robots 3,6 \
+  --red-robots 2,4 \
+  --green-waste 24,48 \
+  --yellow-waste 12,24 \
+  --red-waste 12,24 \
+  --max-steps-grid 300,600 \
+  --repetitions 3 \
+  --seed-base 1000 \
+  --output-dir benchmark_results
+```
+
+This command runs all parameter combinations (`Cartesian product`) and stores:
+- `benchmark_metadata.json` — benchmark setup (grid values, repetitions, seeds, total planned runs).
+- `benchmark_runs.csv` — one row per run with final metrics and run status.
+- `benchmark_scenarios.csv` — aggregated per-scenario metrics (mean/std/min/max).
+- `benchmark_timeseries.csv` — per-step metrics from `DataCollector` (unless `--skip-timeseries` is used).
+
+Main optimization targets available in CSV output:
+- `steps_executed`
+- `final_remaining_waste`
+- `final_efficiency`
+- `final_total_distance`
+- `completion_rate` (scenario-level)
+
+### Plot benchmark results
+
+After the benchmark, generate plots with:
+
+```bash
+python plot_benchmark.py --input-dir benchmark_results
+```
+
+Optional flags:
+- `--output-dir benchmark_results/plots_custom`
+- `--skip-timeseries` (faster when `benchmark_timeseries.csv` is very large)
+- `--top-scenario-labels 20`
+
+Generated images (PNG):
+- `run_level_distributions.png`
+- `runtime_distribution.png`
+- `parameter_impact_completion.png`
+- `parameter_impact_steps.png`
+- `parameter_impact_efficiency.png`
+- `scenario_frontier.png`
+- `timeseries_summary.png` (unless `--skip-timeseries`)
 
 ---
 

@@ -38,6 +38,7 @@ class RobotMissionModel(Model):
         initial_yellow_waste: int = DEFAULT_PARAMS["initial_yellow_waste"],
         initial_red_waste: int = DEFAULT_PARAMS["initial_red_waste"],
         max_steps: int = DEFAULT_PARAMS["max_steps"],
+        collect_agent_data: bool = True,
         seed: int | None = None,
     ):
         super().__init__(seed=seed)
@@ -52,12 +53,13 @@ class RobotMissionModel(Model):
         self.zone_boundaries = self._build_zones()
         self.east_targets = self._build_east_targets()
         self.visit_counts = [[0 for _ in range(self.width)] for _ in range(self.height)]
+        self.collect_agent_data = collect_agent_data
 
         self._create_environment()
         self._create_initial_wastes(initial_green_waste, initial_yellow_waste, initial_red_waste)
         self._create_robots(n_green_robots, n_yellow_robots, n_red_robots)
         self._record_robot_visits()
-        self.datacollector = self._build_datacollector()
+        self.datacollector = self._build_datacollector(collect_agent_data=collect_agent_data)
         self.datacollector.collect(self)
 
     def _build_zones(self) -> dict[str, tuple[int, int]]:
@@ -155,7 +157,18 @@ class RobotMissionModel(Model):
         for robot in self.robot_agents():
             self._record_visit(getattr(robot, "pos", None))
 
-    def _build_datacollector(self) -> DataCollector:
+    def _build_datacollector(self, collect_agent_data: bool | None = None) -> DataCollector:
+        if collect_agent_data is None:
+            collect_agent_data = self.collect_agent_data
+
+        agent_reporters = None
+        if collect_agent_data:
+            agent_reporters = {
+                "Type": lambda a: getattr(a, "robot_type", type(a).__name__),
+                "Position": lambda a: getattr(a, "pos", None),
+                "Cargo": lambda a: len(getattr(a, "carrying", [])),
+            }
+
         return DataCollector(
             model_reporters={
                 "Green waste": lambda m: m.count_waste("green"),
@@ -168,11 +181,7 @@ class RobotMissionModel(Model):
                 "Active robots": lambda m: m.count_robots(),
                 "Average cargo": lambda m: m.average_cargo(),
             },
-            agent_reporters={
-                "Type": lambda a: getattr(a, "robot_type", type(a).__name__),
-                "Position": lambda a: getattr(a, "pos", None),
-                "Cargo": lambda a: len(getattr(a, "carrying", [])),
-            },
+            agent_reporters=agent_reporters,
         )
 
     def waste_agents(self) -> list[Waste]:

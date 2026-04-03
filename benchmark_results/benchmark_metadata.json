@@ -1,0 +1,45 @@
+{
+  "benchmark_date_unix": 1775225771,
+  "repetitions": 3,
+  "seed_base": 1000,
+  "total_scenarios": 512,
+  "total_runs_planned": 1536,
+  "param_grid": {
+    "width": [
+      15,
+      30
+    ],
+    "height": [
+      10,
+      20
+    ],
+    "n_green_robots": [
+      4,
+      8
+    ],
+    "n_yellow_robots": [
+      3,
+      6
+    ],
+    "n_red_robots": [
+      2,
+      4
+    ],
+    "initial_green_waste": [
+      24,
+      48
+    ],
+    "initial_yellow_waste": [
+      12,
+      24
+    ],
+    "initial_red_waste": [
+      12,
+      24
+    ],
+    "max_steps": [
+      300,
+      600
+    ]
+  }
+}
