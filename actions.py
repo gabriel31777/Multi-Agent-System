@@ -27,6 +27,11 @@ def transform() -> dict:
     return {"type": "transform"}
 
 
+def transform_orphan() -> dict:
+    """Force-transform a single carried item when no pair can be formed."""
+    return {"type": "transform_orphan"}
+
+
 def drop() -> dict:
     return {"type": "drop"}
 

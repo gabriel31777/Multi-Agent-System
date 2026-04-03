@@ -152,7 +152,10 @@ class GreenRobotAgent(BaseRobotAgent):
 
         target_greens = list(visible.get("green", []))
         orphan_greens = list(orphans.get("green", []))
-        can_pick_orphans = len(carrying) == 1 or (len(carrying) == 0 and len(target_greens) + len(orphan_greens) >= 2)
+        # Pick orphans if: already carrying 1 (want to pair), OR no non-orphan greens exist
+        # (meaning the orphan is the last one and will never get a pair).
+        no_more_greens = len(target_greens) == 0
+        can_pick_orphans = len(carrying) == 1 or no_more_greens
         if can_pick_orphans:
             target_greens.extend(orphan_greens)
 
@@ -163,10 +166,9 @@ class GreenRobotAgent(BaseRobotAgent):
             return BaseRobotAgent._action_towards(knowledge, target_drop)
 
         if len(carrying) == 1 and carrying[0] == "green" and not target_greens:
-            if pos in east_targets:
-                return {"type": "drop", "kwargs": {"orphan": True}}
-            target_drop = min(east_targets, key=lambda p: abs(p[0]-pos[0]) + abs(p[1]-pos[1]))
-            return BaseRobotAgent._action_towards(knowledge, target_drop)
+            # No pair possible: force-promote the single green → yellow so the
+            # yellow robot can carry it forward without leaving dead waste.
+            return actions.transform_orphan()
 
         # After dropping yellow at the handoff point, vacate this cell so yellow robots can enter.
         if pos in east_targets and not carrying:
@@ -214,7 +216,9 @@ class YellowRobotAgent(BaseRobotAgent):
 
         target_yellows = list(visible.get("yellow", []))
         orphan_yellows = list(orphans.get("yellow", []))
-        can_pick_orphans = len(carrying) == 1 or (len(carrying) == 0 and len(target_yellows) + len(orphan_yellows) >= 2)
+        # Pick orphans if: already carrying 1 (want to pair), OR no non-orphan yellows exist.
+        no_more_yellows = len(target_yellows) == 0
+        can_pick_orphans = len(carrying) == 1 or no_more_yellows
         if can_pick_orphans:
             target_yellows.extend(orphan_yellows)
 
@@ -225,10 +229,9 @@ class YellowRobotAgent(BaseRobotAgent):
             return BaseRobotAgent._action_towards(knowledge, target_drop)
 
         if len(carrying) == 1 and carrying[0] == "yellow" and not target_yellows:
-            if pos in east_targets:
-                return {"type": "drop", "kwargs": {"orphan": True}}
-            target_drop = min(east_targets, key=lambda p: abs(p[0]-pos[0]) + abs(p[1]-pos[1]))
-            return BaseRobotAgent._action_towards(knowledge, target_drop)
+            # No pair possible: force-promote the single yellow to red so the
+            # red robot can pick it up and dispose it.
+            return actions.transform_orphan()
 
         if len(carrying) >= 2 and all(t == "yellow" for t in carrying):
             return actions.transform()

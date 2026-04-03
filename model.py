@@ -301,6 +301,16 @@ class RobotMissionModel(Model):
                     w.orphan = True
                 self.grid.place_agent(w, agent.pos)
 
+        elif action_type == "transform_orphan":
+            # Force-transform a single item when no pair can be formed.
+            if (
+                agent.output_type is not None
+                and len(agent.carrying) == 1
+                and agent.carrying[0] == agent.collectible_type
+            ):
+                agent.carrying.pop()
+                agent.carrying.append(agent.output_type)
+
         elif action_type == "dispose":
             if agent.pos == self.disposal_pos and len(agent.carrying) == 1 and agent.carrying[0] == "red":
                 agent.carrying.pop()
