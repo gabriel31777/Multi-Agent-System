@@ -235,12 +235,14 @@ class RobotMissionModel(Model):
 
         visible_waste_positions = {"green": [], "yellow": [], "red": []}
         orphan_waste_positions = {"green": [], "yellow": [], "red": []}
-        for waste in self.waste_agents():
-            if self.zone_for_pos(waste.pos) in agent.allowed_zones:
-                if getattr(waste, "orphan", False):
-                    orphan_waste_positions[waste.waste_type].append(waste.pos)
-                else:
-                    visible_waste_positions[waste.waste_type].append(waste.pos)
+        for pos, tile_data in visible_tiles.items():
+            for w in tile_data.get("wastes", []):
+                w_type = w.get("waste_type")
+                if w_type:
+                    if w.get("orphan", False):
+                        orphan_waste_positions[w_type].append(pos)
+                    else:
+                        visible_waste_positions[w_type].append(pos)
 
         allowed_moves = self.get_accessible_neighborhood(agent)
         free_moves = [pos for pos in allowed_moves if self._is_robot_cell_free(pos, ignore_agent=agent)]

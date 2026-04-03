@@ -16,6 +16,10 @@ from matplotlib.patches import Rectangle
 from mesa.visualization import SolaraViz
 from mesa.visualization.utils import update_counter
 
+show_green_lines = solara.reactive(True)
+show_yellow_lines = solara.reactive(True)
+show_red_lines = solara.reactive(True)
+
 # Handle both package imports and direct execution
 try:
     from .config import DEFAULT_PARAMS, ROBOT_COLORS, WASTE_COLORS
@@ -89,6 +93,14 @@ def MetricsSummary(model):
 
             with solara.Card("Total distance"):
                 solara.Markdown(f"## {total_distance}")
+
+@solara.component
+def VisualizationControls(model):
+    with solara.Sidebar():
+        with solara.Card("Trajectory Visualization", margin=0, elevation=0):
+            solara.Checkbox(label="Green Trajectories", value=show_green_lines)
+            solara.Checkbox(label="Yellow Trajectories", value=show_yellow_lines)
+            solara.Checkbox(label="Red Trajectories", value=show_red_lines)
             
 
 @solara.component
@@ -123,6 +135,47 @@ def GridZones(model):
         pos = getattr(agent, "pos", None)
         if pos is None:
             continue
+            
+        # Draw robot internal paths
+        rtype = getattr(agent, "robot_type", None)
+        
+        do_show = False
+        if rtype == "green" and show_green_lines.value:
+            do_show = True
+        elif rtype == "yellow" and show_yellow_lines.value:
+            do_show = True
+        elif rtype == "red" and show_red_lines.value:
+            do_show = True
+            
+        if do_show:
+            knowledge = getattr(agent, "knowledge", {})
+            x, y = pos
+            
+            # Memory of wastes
+            visible = knowledge.get("visible_waste_positions", {}).get(rtype, [])
+            orphans = knowledge.get("orphan_waste_positions", {}).get(rtype, [])
+            target_wastes = visible + orphans
+            
+            if rtype == "green":
+                mem_color = "#2e7d32"
+            elif rtype == "yellow":
+                mem_color = "#d4a919"
+            else:
+                mem_color = "#c62828"
+                
+            for mx, my in target_wastes:
+                ax.plot([x, mx], [y, my], color=mem_color, linestyle=":", linewidth=0.8, alpha=0.5, zorder=5)
+
+            # Planned Trajectory
+            current_goal = knowledge.get("current_goal")
+            goal_type = knowledge.get("goal_type")
+            if current_goal:
+                gx, gy = current_goal
+                if goal_type == "patrol":
+                    ax.plot([x, gx], [y, gy], color="blue", linestyle="--", linewidth=1.2, alpha=0.6, zorder=6)
+                else:
+                    ax.plot([x, gx], [y, gy], color="magenta", linestyle="-", linewidth=1.5, alpha=0.8, zorder=6)
+
         portrayal = agent_portrayal(agent)
         x, y = pos
 
@@ -306,6 +359,7 @@ SpaceGraph = GridZones
 page = SolaraViz(
     model,
     components=[
+        (VisualizationControls, 0),
         (MetricsSummary, 0),
         (GridZones, 0),
         (WastePlot, 0),
