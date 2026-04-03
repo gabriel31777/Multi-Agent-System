@@ -62,9 +62,61 @@ class BaseRobotAgent(Agent):
 
     def _update_knowledge(self, percepts: dict):
         self.knowledge.update(percepts)
+        self.knowledge["current_goal"] = None
+        self.knowledge["goal_type"] = None
         memory = self.knowledge.setdefault("memory", {})
         for pos, content in percepts.get("visible_tiles", {}).items():
             memory[pos] = content
+            
+        for pos, tile in memory.items():
+            if tile.get("zone") in self.allowed_zones:
+                for w in tile.get("wastes", []):
+                    wtype = w.get("waste_type")
+                    if wtype:
+                        target_dict = self.knowledge["orphan_waste_positions"] if w.get("orphan", False) else self.knowledge["visible_waste_positions"]
+                        if wtype in target_dict and pos not in target_dict[wtype]:
+                            target_dict[wtype].append(pos)
+                            
+        if "patrol_path" not in self.knowledge:
+            boundaries = self.model.zone_boundaries
+            allowed_xs = []
+            for z in self.allowed_zones:
+                if z in boundaries:
+                    allowed_xs.extend([boundaries[z][0], boundaries[z][1]])
+            if not allowed_xs:
+                allowed_xs = [0, self.model.width - 1]
+            min_x = min(allowed_xs)
+            max_x = max(allowed_xs)
+            ymax = self.model.height - 1
+
+            path = []
+            up = True
+            xs = list(range(min_x + 1, max_x + 1, 3))
+            if not xs:
+                xs = [(min_x + max_x) // 2]
+            elif xs[-1] + 1 < max_x:
+                xs.append(max_x - 1)
+
+            for x in xs:
+                if up:
+                    path.append((x, 0))
+                    path.append((x, ymax))
+                else:
+                    path.append((x, ymax))
+                    path.append((x, 0))
+                up = not up
+
+            closest_idx = 0
+            best_dist = float('inf')
+            pos = self.pos if self.pos else (min_x, 0)
+            for i, p in enumerate(path):
+                dist = abs(p[0] - pos[0]) + abs(p[1] - pos[1])
+                if dist < best_dist:
+                    best_dist = dist
+                    closest_idx = i
+                    
+            self.knowledge["patrol_path"] = path[closest_idx:] + path[:closest_idx]
+
         self.knowledge["pos"] = self.pos
         self.knowledge["carrying_types"] = list(self.carrying)
         self.knowledge["robot_type"] = self.robot_type
@@ -89,7 +141,9 @@ class BaseRobotAgent(Agent):
         return free_moves
 
     @staticmethod
-    def _action_towards(knowledge: dict, target: tuple[int, int] | None) -> dict:
+    def _action_towards(knowledge: dict, target: tuple[int, int] | None, goal_type: str = "objective") -> dict:
+        knowledge["current_goal"] = target
+        knowledge["goal_type"] = goal_type
         if target is None:
             return actions.idle()
         pos = knowledge["pos"]
@@ -111,26 +165,19 @@ class BaseRobotAgent(Agent):
         return min(positions, key=lambda p: abs(p[0] - pos[0]) + abs(p[1] - pos[1]))
 
     @staticmethod
-    def _get_fallback_target(knowledge: dict, targets: list[tuple[int, int]]) -> tuple[int, int]:
+    def _get_lawnmower_target(knowledge: dict) -> tuple[int, int]:
         pos = knowledge["pos"]
-        target_x = targets[0][0]
-        closest = min(targets, key=lambda p: abs(p[0]-pos[0]) + abs(p[1]-pos[1]))
+        path = knowledge.get("patrol_path", [])
         
-        if pos[0] < target_x:
-            return closest
+        if not path:
+            return knowledge.get("random_move", pos)
             
-        recent_pos = {step["pos"] for step in knowledge["history"]}
-        recent_pos.add(pos)
-        
-        unvisited = [p for p in targets if p not in recent_pos]
-        if unvisited:
-            return min(unvisited, key=lambda p: abs(p[0]-pos[0]) + abs(p[1]-pos[1]))
-            
-        others = [p for p in targets if p != pos]
-        if others:
-            return min(others, key=lambda p: abs(p[0]-pos[0]) + abs(p[1]-pos[1]))
-            
-        return closest
+        current_target = path[0]
+        if abs(pos[0] - current_target[0]) <= 1 and abs(pos[1] - current_target[1]) <= 1:
+            path.append(path.pop(0))
+            current_target = path[0]
+
+        return current_target
 
 
 class GreenRobotAgent(BaseRobotAgent):
@@ -194,8 +241,8 @@ class GreenRobotAgent(BaseRobotAgent):
         if target is not None:
             return BaseRobotAgent._action_towards(knowledge, target)
 
-        frontier = BaseRobotAgent._get_fallback_target(knowledge, east_targets)
-        return BaseRobotAgent._action_towards(knowledge, frontier)
+        frontier = BaseRobotAgent._get_lawnmower_target(knowledge)
+        return BaseRobotAgent._action_towards(knowledge, frontier, goal_type="patrol")
 
 
 class YellowRobotAgent(BaseRobotAgent):
@@ -248,8 +295,8 @@ class YellowRobotAgent(BaseRobotAgent):
         if target is not None:
             return BaseRobotAgent._action_towards(knowledge, target)
 
-        frontier = BaseRobotAgent._get_fallback_target(knowledge, east_targets)
-        return BaseRobotAgent._action_towards(knowledge, frontier)
+        frontier = BaseRobotAgent._get_lawnmower_target(knowledge)
+        return BaseRobotAgent._action_towards(knowledge, frontier, goal_type="patrol")
 
 
 class RedRobotAgent(BaseRobotAgent):
@@ -281,4 +328,5 @@ class RedRobotAgent(BaseRobotAgent):
         if target is not None:
             return BaseRobotAgent._action_towards(knowledge, target)
 
-        return BaseRobotAgent._action_towards(knowledge, knowledge["random_move"])
+        frontier = BaseRobotAgent._get_lawnmower_target(knowledge)
+        return BaseRobotAgent._action_towards(knowledge, frontier, goal_type="patrol")
