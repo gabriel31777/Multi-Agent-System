@@ -32,9 +32,12 @@ MSG_HANDOFF_READY = "handoff_ready"
 MSG_HANDOFF_CLAIM = "handoff_claim"
 MSG_TARGET_FOUND = "target_found"
 MSG_TARGET_CLAIM = "target_claim"
+MSG_CONGESTION_ALERT = "congestion_alert"
+MSG_ZONE_CLEAR = "zone_clear"
 
 TARGET_CLAIM_TTL = 6
 HANDOFF_TTL = 12
+CONGESTION_TTL = 10
 
 
 class BaseRobotAgent(Agent):
@@ -60,9 +63,15 @@ class BaseRobotAgent(Agent):
             "handoff_targets": [],
             "active_handoff": None,
             "peer_target_claims": {},
+            "congested_drop_cells": {},
             "target_found_event": None,
             "last_target_claim": None,
             "last_target_claim_step": -1,
+            "last_congestion_alerts": {},
+            "zone_clear_active": False,
+            "zone_clear_announced": False,
+            "patrol_rotations": 0,
+            "patrol_cycles": 0,
         }
 
     @property
@@ -90,6 +99,7 @@ class BaseRobotAgent(Agent):
         percepts = self.model.get_percepts(self)
         self._update_knowledge(percepts)
         self._process_messages()
+        self._maybe_announce_zone_clear()
         action = self.deliberate(self.knowledge)
         self._maybe_publish_target_claim()
 
@@ -184,6 +194,12 @@ class BaseRobotAgent(Agent):
         self.knowledge.setdefault("handoff_targets", [])
         self.knowledge.setdefault("active_handoff", None)
         self.knowledge.setdefault("peer_target_claims", {})
+        self.knowledge.setdefault("congested_drop_cells", {})
+        self.knowledge.setdefault("last_congestion_alerts", {})
+        self.knowledge.setdefault("zone_clear_active", False)
+        self.knowledge.setdefault("zone_clear_announced", False)
+        self.knowledge.setdefault("patrol_rotations", 0)
+        self.knowledge.setdefault("patrol_cycles", 0)
         self._cleanup_comm_state()
         self._refresh_handoff_targets()
 
@@ -267,6 +283,166 @@ class BaseRobotAgent(Agent):
             active_step = int(active_handoff.get("step", step))
             if step - active_step > HANDOFF_TTL:
                 self.knowledge["active_handoff"] = None
+
+        congested = self.knowledge.setdefault("congested_drop_cells", {})
+        for pos, info in list(congested.items()):
+            if step - int(info.get("step", step)) > CONGESTION_TTL:
+                congested.pop(pos, None)
+
+        recent_alerts = self.knowledge.setdefault("last_congestion_alerts", {})
+        for pos, alert_step in list(recent_alerts.items()):
+            if step - int(alert_step) > CONGESTION_TTL:
+                recent_alerts.pop(pos, None)
+
+    def _is_waste_in_tile(self, wastes: list[dict], waste_type: str) -> bool:
+        return any(w.get("waste_type") == waste_type for w in wastes)
+
+    def _mark_congested_drop_cell(self, pos: tuple[int, int], waste_type: str, zone: str, sender: str | None = None):
+        if pos is None:
+            return
+        self.knowledge["congested_drop_cells"][pos] = {
+            "waste_type": waste_type,
+            "zone": zone,
+            "step": self.knowledge.get("step", 0),
+            "sender": sender or self.get_name(),
+        }
+
+    def _clear_congested_drop_cell(self, pos: tuple[int, int]):
+        self.knowledge.get("congested_drop_cells", {}).pop(pos, None)
+        self.knowledge.get("last_congestion_alerts", {}).pop(pos, None)
+
+    def _congested_drop_targets(self, waste_type: str, zone: str | None = None) -> set[tuple[int, int]]:
+        blocked = set()
+        for pos, info in self.knowledge.get("congested_drop_cells", {}).items():
+            if info.get("waste_type") != waste_type:
+                continue
+            if zone is not None and info.get("zone") != zone:
+                continue
+            blocked.add(pos)
+        return blocked
+
+    def _broadcast_congestion_alert(self, pos: tuple[int, int], waste_type: str, zone: str):
+        last_alert_step = self.knowledge.get("last_congestion_alerts", {}).get(pos)
+        now_step = int(self.knowledge.get("step", 0))
+        if last_alert_step is not None and (now_step - int(last_alert_step)) < 2:
+            return
+
+        self.knowledge.setdefault("last_congestion_alerts", {})[pos] = now_step
+        self._mark_congested_drop_cell(pos, waste_type, zone, sender=self.get_name())
+        content = {
+            "kind": MSG_CONGESTION_ALERT,
+            "robot_type": self.robot_type,
+            "pos": pos,
+            "waste_type": waste_type,
+            "zone": zone,
+            "step": now_step,
+            "sender": self.get_name(),
+        }
+        self._broadcast(self._peer_names(), MessagePerformative.INFORM_REF, content)
+
+    def _handle_congestion_alert(self, sender: str, content: dict):
+        alert_pos = self._normalize_pos(content.get("pos"))
+        if alert_pos is None:
+            return
+        if content.get("robot_type") not in (None, self.robot_type):
+            return
+
+        waste_type = content.get("waste_type")
+        zone = content.get("zone")
+        if waste_type is None:
+            return
+
+        self._mark_congested_drop_cell(alert_pos, waste_type, zone or "unknown", sender=sender)
+
+    def _known_collectible_targets_count(self) -> int:
+        collectible = self.collectible_type
+        if collectible is None:
+            return 0
+        visible = self.knowledge.get("visible_waste_positions", {}).get(collectible, [])
+        orphans = self.knowledge.get("orphan_waste_positions", {}).get(collectible, [])
+        return len(visible) + len(orphans)
+
+    def _has_pending_collectible_handoff(self) -> bool:
+        collectible = self.collectible_type
+        for offer in self.knowledge.get("pending_handoffs", {}).values():
+            if offer.get("waste_type") == collectible:
+                return True
+        return False
+
+    def _maybe_announce_zone_clear(self):
+        if self.collectible_type is None:
+            return
+        if self.knowledge.get("zone_clear_active"):
+            return
+        if self.knowledge.get("zone_clear_announced"):
+            return
+        if getattr(self.model, "zone_clear_announced", {}).get(self.robot_type, False):
+            return
+        if self._known_collectible_targets_count() > 0:
+            return
+        if self._has_pending_collectible_handoff():
+            return
+        if self.cargo_count > 0:
+            return
+        if int(self.knowledge.get("patrol_cycles", 0)) < 1:
+            return
+
+        step = int(self.knowledge.get("step", 0))
+        content = {
+            "kind": MSG_ZONE_CLEAR,
+            "robot_type": self.robot_type,
+            "sender": self.get_name(),
+            "step": step,
+        }
+        self._broadcast(self._peer_names(), MessagePerformative.INFORM_REF, content)
+        self.knowledge["zone_clear_active"] = True
+        self.knowledge["zone_clear_announced"] = True
+        if hasattr(self.model, "zone_clear_announced"):
+            self.model.zone_clear_announced[self.robot_type] = True
+
+    def _handle_zone_clear(self, sender: str, content: dict):
+        if content.get("robot_type") not in (None, self.robot_type):
+            return
+        self.knowledge["zone_clear_active"] = True
+        self.knowledge["active_handoff"] = None
+
+    def _zone_clear_unblock_action(self, knowledge: dict, carrying: list[str]) -> dict | None:
+        if not self.knowledge.get("zone_clear_active"):
+            return None
+        if len(carrying) != 0:
+            return None
+        if self.output_type is None:
+            return None
+
+        handoff_zone = self._drop_handoff_zone()
+        if handoff_zone is None:
+            return None
+
+        pos = knowledge.get("pos")
+        east_targets = knowledge.get("east_targets", {}).get(handoff_zone, [])
+        if pos not in east_targets:
+            return None
+
+        same_cell = knowledge.get("current_tile_wastes", [])
+        has_processed_waste = any(w.get("waste_type") == self.output_type for w in same_cell)
+        if not has_processed_waste:
+            return None
+
+        # On zone clear, free handoff border cells if standing over processed waste.
+        retreat_target = (max(0, pos[0] - 1), pos[1])
+        retreat_action = BaseRobotAgent._action_towards(knowledge, retreat_target, goal_type="unblock")
+        if retreat_action.get("type") != "idle":
+            return retreat_action
+
+        random_target = knowledge.get("random_move", pos)
+        random_action = BaseRobotAgent._action_towards(knowledge, random_target, goal_type="unblock")
+        if random_action.get("type") != "idle":
+            return random_action
+
+        return None
+
+    def _should_idle_due_zone_clear(self, carrying: list[str]) -> bool:
+        return bool(self.knowledge.get("zone_clear_active")) and len(carrying) == 0
 
     def _refresh_handoff_targets(self):
         candidates = []
@@ -456,6 +632,10 @@ class BaseRobotAgent(Agent):
                 self._handle_target_found(sender, content)
             elif kind == MSG_TARGET_CLAIM:
                 self._handle_target_claim(sender, content)
+            elif kind == MSG_CONGESTION_ALERT:
+                self._handle_congestion_alert(sender, content)
+            elif kind == MSG_ZONE_CLEAR:
+                self._handle_zone_clear(sender, content)
 
         self._cleanup_comm_state()
         self._claim_best_pending_handoff()
@@ -640,6 +820,10 @@ class BaseRobotAgent(Agent):
         current_target = path[0]
         if abs(pos[0] - current_target[0]) <= 1 and abs(pos[1] - current_target[1]) <= 1:
             path.append(path.pop(0))
+            rotations = int(knowledge.get("patrol_rotations", 0)) + 1
+            knowledge["patrol_rotations"] = rotations
+            if len(path) > 0 and rotations % len(path) == 0:
+                knowledge["patrol_cycles"] = int(knowledge.get("patrol_cycles", 0)) + 1
             current_target = path[0]
 
         return current_target
@@ -661,6 +845,13 @@ class GreenRobotAgent(BaseRobotAgent):
         east_targets = knowledge["east_targets"]["z1"]
         same_cell = knowledge["current_tile_wastes"]
 
+        unblock_action = self._zone_clear_unblock_action(knowledge, carrying)
+        if unblock_action is not None:
+            return unblock_action
+
+        if self._should_idle_due_zone_clear(carrying):
+            return actions.idle()
+
         target_greens = list(visible.get("green", []))
         orphan_greens = list(orphans.get("green", []))
         # Pick orphans if: already carrying 1 (want to pair), OR no non-orphan greens exist
@@ -673,8 +864,26 @@ class GreenRobotAgent(BaseRobotAgent):
 
         if len(carrying) == 1 and carrying[0] == "yellow":
             if pos in east_targets:
+                if self._is_waste_in_tile(same_cell, "yellow"):
+                    self._broadcast_congestion_alert(pos, waste_type="yellow", zone="z1")
+                    blocked_targets = self._congested_drop_targets("yellow", zone="z1")
+                    fallback_targets = [p for p in east_targets if p != pos]
+                    candidate_targets = [p for p in fallback_targets if p not in blocked_targets]
+                    if not candidate_targets:
+                        candidate_targets = fallback_targets
+                    if candidate_targets:
+                        target_drop = min(candidate_targets, key=lambda p: abs(p[0]-pos[0]) + abs(p[1]-pos[1]))
+                        return BaseRobotAgent._action_towards(knowledge, target_drop)
+                    return BaseRobotAgent._action_towards(knowledge, knowledge["random_move"])
+
+                self._clear_congested_drop_cell(pos)
                 return actions.drop()
-            target_drop = min(east_targets, key=lambda p: abs(p[0]-pos[0]) + abs(p[1]-pos[1]))
+
+            blocked_targets = self._congested_drop_targets("yellow", zone="z1")
+            candidate_targets = [p for p in east_targets if p not in blocked_targets]
+            if not candidate_targets:
+                candidate_targets = east_targets
+            target_drop = min(candidate_targets, key=lambda p: abs(p[0]-pos[0]) + abs(p[1]-pos[1]))
             return BaseRobotAgent._action_towards(knowledge, target_drop)
 
         if len(carrying) == 1 and carrying[0] == "green" and not target_greens:
@@ -724,6 +933,14 @@ class YellowRobotAgent(BaseRobotAgent):
         visible = knowledge["visible_waste_positions"]
         orphans = knowledge.get("orphan_waste_positions", {})
         east_targets = knowledge["east_targets"]["z2"]
+        same_cell = knowledge["current_tile_wastes"]
+
+        unblock_action = self._zone_clear_unblock_action(knowledge, carrying)
+        if unblock_action is not None:
+            return unblock_action
+
+        if self._should_idle_due_zone_clear(carrying):
+            return actions.idle()
 
         target_yellows = list(visible.get("yellow", []))
         orphan_yellows = list(orphans.get("yellow", []))
@@ -736,8 +953,26 @@ class YellowRobotAgent(BaseRobotAgent):
 
         if len(carrying) == 1 and carrying[0] == "red":
             if pos in east_targets:
+                if self._is_waste_in_tile(same_cell, "red"):
+                    self._broadcast_congestion_alert(pos, waste_type="red", zone="z2")
+                    blocked_targets = self._congested_drop_targets("red", zone="z2")
+                    fallback_targets = [p for p in east_targets if p != pos]
+                    candidate_targets = [p for p in fallback_targets if p not in blocked_targets]
+                    if not candidate_targets:
+                        candidate_targets = fallback_targets
+                    if candidate_targets:
+                        target_drop = min(candidate_targets, key=lambda p: abs(p[0]-pos[0]) + abs(p[1]-pos[1]))
+                        return BaseRobotAgent._action_towards(knowledge, target_drop)
+                    return BaseRobotAgent._action_towards(knowledge, knowledge["random_move"])
+
+                self._clear_congested_drop_cell(pos)
                 return actions.drop()
-            target_drop = min(east_targets, key=lambda p: abs(p[0]-pos[0]) + abs(p[1]-pos[1]))
+
+            blocked_targets = self._congested_drop_targets("red", zone="z2")
+            candidate_targets = [p for p in east_targets if p not in blocked_targets]
+            if not candidate_targets:
+                candidate_targets = east_targets
+            target_drop = min(candidate_targets, key=lambda p: abs(p[0]-pos[0]) + abs(p[1]-pos[1]))
             return BaseRobotAgent._action_towards(knowledge, target_drop)
 
         if len(carrying) == 1 and carrying[0] == "yellow" and not target_yellows:
@@ -748,7 +983,6 @@ class YellowRobotAgent(BaseRobotAgent):
         if len(carrying) >= 2 and all(t == "yellow" for t in carrying):
             return actions.transform()
 
-        same_cell = knowledge["current_tile_wastes"]
         yellow_here = [w for w in same_cell if w["waste_type"] == "yellow"]
         if yellow_here:
             if not can_pick_orphans:
@@ -791,6 +1025,13 @@ class RedRobotAgent(BaseRobotAgent):
         carrying = knowledge["carrying_types"]
         disposal_pos = knowledge["disposal_pos"]
         visible = knowledge["visible_waste_positions"]
+
+        unblock_action = self._zone_clear_unblock_action(knowledge, carrying)
+        if unblock_action is not None:
+            return unblock_action
+
+        if self._should_idle_due_zone_clear(carrying):
+            return actions.idle()
 
         if len(carrying) == 1 and carrying[0] == "red":
             if pos == disposal_pos:

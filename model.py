@@ -40,6 +40,7 @@ class RobotMissionModel(Model):
         initial_yellow_waste: int = DEFAULT_PARAMS["initial_yellow_waste"],
         initial_red_waste: int = DEFAULT_PARAMS["initial_red_waste"],
         max_steps: int = DEFAULT_PARAMS["max_steps"],
+        enable_propose_messages: bool = True,
         collect_agent_data: bool = True,
         seed: int | None = None,
     ):
@@ -48,12 +49,14 @@ class RobotMissionModel(Model):
         self.width = width
         self.height = height
         self.max_steps = max_steps
+        self.enable_propose_messages = bool(enable_propose_messages)
         self.running = True
         self.disposed_waste = 0
         self.total_distance = 0
         self.disposal_pos = None
         self.zone_boundaries = self._build_zones()
         self.east_targets = self._build_east_targets()
+        self.zone_clear_announced = {"green": False, "yellow": False, "red": False}
         self.visit_counts = [[0 for _ in range(self.width)] for _ in range(self.height)]
         self.collect_agent_data = collect_agent_data
         self.message_service = self._configure_message_service()
@@ -73,6 +76,7 @@ class RobotMissionModel(Model):
             service.set_model(self)
             service.set_instant_delivery(False)
         service.set_log_messages(False)
+        service.set_drop_propose_messages(not self.enable_propose_messages)
         return service
 
     def _build_zones(self) -> dict[str, tuple[int, int]]:

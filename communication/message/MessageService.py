@@ -34,6 +34,7 @@ class MessageService:
             self.__log_messages = False
             self.__message_history = deque(maxlen=500)
             self.__message_counter = 0
+            self.__drop_propose_messages = False
 
     def set_model(self, model):
         """Bind service to a model instance."""
@@ -50,6 +51,13 @@ class MessageService:
         """ Set the instant delivery parameter.
         """
         self.__instant_delivery = instant_delivery
+
+    def set_drop_propose_messages(self, drop_messages: bool):
+        """Enable/disable dropping messages with performative PROPOSE."""
+        self.__drop_propose_messages = bool(drop_messages)
+
+    def get_drop_propose_messages(self) -> bool:
+        return self.__drop_propose_messages
 
     def _record_message(self, message):
         content = message.get_content() if hasattr(message, "get_content") else None
@@ -90,6 +98,9 @@ class MessageService:
     def send_message(self, message):
         """ Dispatch message if instant delivery active, otherwise add the message to proceed list.
         """
+        if self.__drop_propose_messages and str(message.get_performative()) == "PROPOSE":
+            return
+
         if self.__log_messages:
             print(message)
         self._record_message(message)

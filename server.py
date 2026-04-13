@@ -19,6 +19,7 @@ from mesa.visualization.utils import update_counter
 show_green_lines = solara.reactive(True)
 show_yellow_lines = solara.reactive(True)
 show_red_lines = solara.reactive(True)
+enable_propose_messages_ui = solara.reactive(True)
 
 # Handle both package imports and direct execution
 try:
@@ -96,11 +97,23 @@ def MetricsSummary(model):
 
 @solara.component
 def VisualizationControls(model):
+    # Keep UI toggle aligned with model default at the beginning of each run.
+    if getattr(model, "steps", 0) == 0:
+        model_default = bool(getattr(model, "enable_propose_messages", True))
+        if enable_propose_messages_ui.value != model_default:
+            enable_propose_messages_ui.value = model_default
+
+    message_service = getattr(model, "message_service", None)
+    if message_service is not None and hasattr(message_service, "set_drop_propose_messages"):
+        message_service.set_drop_propose_messages(not enable_propose_messages_ui.value)
+
     with solara.Sidebar():
         with solara.Card("Trajectory Visualization", margin=0, elevation=0):
             solara.Checkbox(label="Green Trajectories", value=show_green_lines)
             solara.Checkbox(label="Yellow Trajectories", value=show_yellow_lines)
             solara.Checkbox(label="Red Trajectories", value=show_red_lines)
+        with solara.Card("Communication", margin=0, elevation=0):
+            solara.Checkbox(label="Enable PROPOSE messages", value=enable_propose_messages_ui)
             
 
 @solara.component
@@ -310,15 +323,19 @@ def CommunicationMetrics(model):
         pending_handoffs += len(knowledge.get("pending_handoffs", {}))
         peer_claims += len(knowledge.get("peer_target_claims", {}))
 
-    with solara.Columns([1, 1, 1, 1]):
-        with solara.Card("Messages logged"):
-            solara.Markdown(f"## {len(history)}")
-        with solara.Card("Active handoffs"):
-            solara.Markdown(f"## {active_handoffs}")
-        with solara.Card("Pending handoffs"):
-            solara.Markdown(f"## {pending_handoffs}")
-        with solara.Card("Target claims tracked"):
-            solara.Markdown(f"## {peer_claims}")
+    with solara.Column():
+        with solara.Columns([1, 1]):
+            with solara.Card("Messages logged"):
+                solara.Markdown(f"## {len(history)}")
+            with solara.Card("Active handoffs"):
+                solara.Markdown(f"## {active_handoffs}")
+
+        with solara.Columns([1, 1]):
+            with solara.Card("Pending handoffs"):
+                solara.Markdown(f"## {pending_handoffs}")
+
+            with solara.Card("Target claims tracked"):
+                solara.Markdown(f"## {peer_claims}")
 
 
 def _fmt_pos(pos) -> str:
@@ -491,6 +508,11 @@ model_params = {
         "max": 60,
         "step": 1,
     },
+    "enable_propose_messages": {
+        "type": "Checkbox",
+        "value": False,
+        "label": "Enable PROPOSE messages",
+    },
     "max_steps": DEFAULT_PARAMS["max_steps"],
 }
 
@@ -500,11 +522,11 @@ SpaceGraph = GridZones
 page = SolaraViz(
     model,
     components=[
-        (VisualizationControls, 0),
-        (MetricsSummary, 0),
         (GridZones, 0),
+        (MetricsSummary, 0),
         (WastePlot, 0),
         (MissionHistogram, 0),
+        (VisualizationControls, 0),
         (GridZones, 1),
         (DistancePlot, 1),
         (EfficiencyPlot, 1),
