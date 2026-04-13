@@ -18,10 +18,12 @@ from mesa.space import MultiGrid
 
 try:
     from .agents import GreenRobotAgent, RedRobotAgent, YellowRobotAgent
+    from .communication.message.MessageService import MessageService
     from .config import DEFAULT_PARAMS, RADIOACTIVITY_BOUNDS
     from .objects import RadioactivityCell, Waste, WasteDisposalZone
 except ImportError:
     from agents import GreenRobotAgent, RedRobotAgent, YellowRobotAgent
+    from communication.message.MessageService import MessageService
     from config import DEFAULT_PARAMS, RADIOACTIVITY_BOUNDS
     from objects import RadioactivityCell, Waste, WasteDisposalZone
 
@@ -54,6 +56,7 @@ class RobotMissionModel(Model):
         self.east_targets = self._build_east_targets()
         self.visit_counts = [[0 for _ in range(self.width)] for _ in range(self.height)]
         self.collect_agent_data = collect_agent_data
+        self.message_service = self._configure_message_service()
 
         self._create_environment()
         self._create_initial_wastes(initial_green_waste, initial_yellow_waste, initial_red_waste)
@@ -61,6 +64,16 @@ class RobotMissionModel(Model):
         self._record_robot_visits()
         self.datacollector = self._build_datacollector(collect_agent_data=collect_agent_data)
         self.datacollector.collect(self)
+
+    def _configure_message_service(self) -> MessageService:
+        service = MessageService.get_instance()
+        if service is None:
+            service = MessageService(self, instant_delivery=False)
+        else:
+            service.set_model(self)
+            service.set_instant_delivery(False)
+        service.set_log_messages(False)
+        return service
 
     def _build_zones(self) -> dict[str, tuple[int, int]]:
         z1_end = max(0, self.width // 3 - 1)
@@ -330,6 +343,7 @@ class RobotMissionModel(Model):
         return self.get_percepts(agent)
 
     def step(self):
+        self.message_service.dispatch_messages()
         self.agents.shuffle_do("step")
         self._record_robot_visits()
         self.datacollector.collect(self)

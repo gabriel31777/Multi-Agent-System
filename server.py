@@ -289,6 +289,147 @@ def RobotVisitsHeatmap(model):
 
     solara.FigureMatplotlib(fig)
 
+
+@solara.component
+def CommunicationMetrics(model):
+    update_counter.get()
+
+    robots = model.robot_agents()
+    history = []
+    message_service = getattr(model, "message_service", None)
+    if message_service is not None and hasattr(message_service, "get_message_history"):
+        history = message_service.get_message_history()
+
+    active_handoffs = 0
+    pending_handoffs = 0
+    peer_claims = 0
+    for robot in robots:
+        knowledge = getattr(robot, "knowledge", {})
+        if isinstance(knowledge.get("active_handoff"), dict):
+            active_handoffs += 1
+        pending_handoffs += len(knowledge.get("pending_handoffs", {}))
+        peer_claims += len(knowledge.get("peer_target_claims", {}))
+
+    with solara.Columns([1, 1, 1, 1]):
+        with solara.Card("Messages logged"):
+            solara.Markdown(f"## {len(history)}")
+        with solara.Card("Active handoffs"):
+            solara.Markdown(f"## {active_handoffs}")
+        with solara.Card("Pending handoffs"):
+            solara.Markdown(f"## {pending_handoffs}")
+        with solara.Card("Target claims tracked"):
+            solara.Markdown(f"## {peer_claims}")
+
+
+def _fmt_pos(pos) -> str:
+    if isinstance(pos, (tuple, list)) and len(pos) == 2:
+        return f"({pos[0]},{pos[1]})"
+    return "-"
+
+
+def _fmt_eta(eta) -> str:
+    if eta is None:
+        return "-"
+    return str(eta)
+
+
+def _md_escape(value) -> str:
+    text = str(value)
+    return text.replace("|", "\\|")
+
+
+def _truncate(value, max_len: int = 70) -> str:
+    text = str(value)
+    if len(text) <= max_len:
+        return text
+    return text[: max_len - 1] + "..."
+
+
+@solara.component
+def CommunicationMessages(model):
+    update_counter.get()
+
+    history = []
+    message_service = getattr(model, "message_service", None)
+    if message_service is not None and hasattr(message_service, "get_message_history"):
+        history = message_service.get_message_history(limit=10)
+
+    with solara.Card("Communication Messages (last 10)", margin=0):
+        if not history:
+            solara.Text("No messages yet.")
+            return
+
+        lines = [
+            "| idx | step | from | to | kind | perf | pos | eta |",
+            "|---:|---:|---|---|---|---|---|---:|",
+        ]
+        for msg in reversed(history):
+            idx = str(msg.get("index", "-"))
+            step = str(msg.get("step", "-"))
+            source = str(msg.get("from", "-"))
+            target = str(msg.get("to", "-"))
+            kind = str(msg.get("kind") or "-")
+            perf = str(msg.get("performative") or "-")
+            pos = _fmt_pos(msg.get("pos"))
+            eta = _fmt_eta(msg.get("eta"))
+            lines.append(
+                f"| {_md_escape(idx)} | {_md_escape(step)} | {_md_escape(source)} | "
+                f"{_md_escape(target)} | {_md_escape(kind)} | {_md_escape(perf)} | "
+                f"{_md_escape(pos)} | {_md_escape(eta)} |"
+            )
+        solara.Markdown("\n".join(lines))
+
+
+def _robot_name(robot) -> str:
+    if hasattr(robot, "get_name"):
+        return robot.get_name()
+    return f"{getattr(robot, 'robot_type', 'robot')}_{robot.unique_id}"
+
+
+def _fmt_handoff_targets_compact(handoff_targets: list) -> str:
+    if not handoff_targets:
+        return "0"
+    first = _fmt_pos(handoff_targets[0])
+    total = len(handoff_targets)
+    if total == 1:
+        return f"1:{first}"
+    return f"{total}:{first}+"
+
+
+@solara.component
+def CommunicationState(model):
+    update_counter.get()
+    robots = sorted(model.robot_agents(), key=lambda r: _robot_name(r))
+
+    with solara.Card("Targets and Handoffs by Robot", margin=0):
+        if not robots:
+            solara.Text("No robots available.")
+            return
+
+        lines = [
+            "| robot | pos | goal(type) | active_handoff | handoff_targets |",
+            "|---|---|---|---|---|",
+        ]
+        for robot in robots:
+            knowledge = getattr(robot, "knowledge", {})
+            goal = _fmt_pos(knowledge.get("current_goal"))
+            goal_type = knowledge.get("goal_type", "-")
+            active_handoff = knowledge.get("active_handoff")
+            active_pos = _fmt_pos(active_handoff.get("pos")) if isinstance(active_handoff, dict) else "-"
+            handoff_targets = knowledge.get("handoff_targets", [])
+            handoff_targets_txt = _fmt_handoff_targets_compact(handoff_targets)
+            robot_name = _truncate(_robot_name(robot), 18)
+            pos_txt = _truncate(_fmt_pos(getattr(robot, "pos", None)), 12)
+            goal_txt = _truncate(f"{goal}({goal_type})", 18)
+            active_txt = _truncate(active_pos, 12)
+            targets_txt = _truncate(handoff_targets_txt, 12)
+            lines.append(
+                f"| {_md_escape(robot_name)} | {_md_escape(pos_txt)} | {_md_escape(goal_txt)} | "
+                f"{_md_escape(active_txt)} | {_md_escape(targets_txt)} |"
+            )
+        solara.Markdown("\n".join(lines))
+
+
 @solara.component
 
 def MissionHistogram(model):
@@ -368,6 +509,10 @@ page = SolaraViz(
         (DistancePlot, 1),
         (EfficiencyPlot, 1),
         (RobotVisitsHeatmap, 1),
+        (GridZones, 2),
+        (CommunicationMetrics, 2),
+        (CommunicationMessages, 2),
+        (CommunicationState, 2),
     ],
     model_params=model_params,
     name="Robot Mission MAS 2026",
