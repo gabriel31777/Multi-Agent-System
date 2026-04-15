@@ -76,12 +76,26 @@ def plot_parameter_impact(
 
         if metric_key == 'completed':
             ax.set_ylim(0, 1)
+        else:
+            ax.set_ylim(bottom=0)
 
     fig.suptitle(title, fontsize=14)
     fig.tight_layout(rect=[0, 0.03, 1, 0.95])
     fig.savefig(output_path, dpi=dpi)
     plt.close(fig)
 
+def plot_proportion_sucessfull_runs(df: pd.DataFrame, output_dir: Path, dpi: int):
+
+    fig, ax = plt.subplots()
+    labels = ['all waste collected', 'not all waste collected']
+    values = [(df['completed'] == 1).sum(), (df['completed'] == 0).sum()]
+    ax.pie(values, labels=labels, autopct='%1.1f%%', startangle=90)
+    ax.set_title("Proportion of successful collection of all waste", fontsize=10)
+    fig.savefig(output_dir / "proportion_successful_collection.png", dpi=dpi)
+    plt.close(fig)
+    
+    
+    
 
 def run_all_plots(df: pd.DataFrame, output_dir: Path, dpi: int, suffix: str):
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -105,6 +119,18 @@ def run_all_plots(df: pd.DataFrame, output_dir: Path, dpi: int, suffix: str):
         output_path=output_dir / "impact_efficiency.png",
         dpi=dpi,
     )
+
+    plot_parameter_impact(
+        df,
+        metric_key="final_remaining_waste",
+        title=f"Parameter Impact on Remaining Waste{suffix}",
+        ylabel="final_remaining_waste",
+        output_path=output_dir / "impact_remaining_waste.png",
+        dpi=dpi,
+    )
+
+    plot_proportion_sucessfull_runs(df, output_dir, dpi)
+
 
 
 def main():
