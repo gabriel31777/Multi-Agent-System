@@ -38,6 +38,7 @@ MSG_ZONE_CLEAR = "zone_clear"
 TARGET_CLAIM_TTL = 6
 HANDOFF_TTL = 12
 CONGESTION_TTL = 10
+TARGET_CLAIM_MIN_ETA = 3
 
 
 class BaseRobotAgent(Agent):
@@ -65,8 +66,7 @@ class BaseRobotAgent(Agent):
             "peer_target_claims": {},
             "congested_drop_cells": {},
             "target_found_event": None,
-            "last_target_claim": None,
-            "last_target_claim_step": -1,
+            "announced_target_claims": set(),
             "last_congestion_alerts": {},
             "zone_clear_active": False,
             "zone_clear_announced": False,
@@ -89,6 +89,9 @@ class BaseRobotAgent(Agent):
             return
         self._message_service.send_message(message)
 
+    def _communication_enabled(self) -> bool:
+        return bool(getattr(self.model, "enable_communication", True))
+
     def get_new_messages(self):
         return self._mailbox.get_new_messages()
 
@@ -98,13 +101,16 @@ class BaseRobotAgent(Agent):
     def step_agent(self):
         percepts = self.model.get_percepts(self)
         self._update_knowledge(percepts)
-        self._process_messages()
-        self._maybe_announce_zone_clear()
+        comm_enabled = self._communication_enabled()
+        if comm_enabled:
+            self._process_messages()
+            self._maybe_announce_zone_clear()
         action = self.deliberate(self.knowledge)
-        self._maybe_publish_target_claim()
+        if comm_enabled:
+            self._maybe_publish_target_claim()
 
         target_found_event = self.knowledge.get("target_found_event")
-        if target_found_event:
+        if comm_enabled and target_found_event:
             self._broadcast_target_found(target_found_event)
             self.knowledge["target_found_event"] = None
 
@@ -113,7 +119,8 @@ class BaseRobotAgent(Agent):
         pos_before = self.pos
         returned_percepts = self.model.do(self, action)
         self._maybe_finalize_handoff(action, pos_before)
-        self._maybe_broadcast_handoff_ready(action, carrying_before, pos_before)
+        if comm_enabled:
+            self._maybe_broadcast_handoff_ready(action, carrying_before, pos_before)
         self.knowledge["last_percepts"] = returned_percepts
         self.knowledge["history"].append(
             {
@@ -195,6 +202,7 @@ class BaseRobotAgent(Agent):
         self.knowledge.setdefault("active_handoff", None)
         self.knowledge.setdefault("peer_target_claims", {})
         self.knowledge.setdefault("congested_drop_cells", {})
+        self.knowledge.setdefault("announced_target_claims", set())
         self.knowledge.setdefault("last_congestion_alerts", {})
         self.knowledge.setdefault("zone_clear_active", False)
         self.knowledge.setdefault("zone_clear_announced", False)
@@ -270,7 +278,8 @@ class BaseRobotAgent(Agent):
         step = self.knowledge.get("step", 0)
         peer_claims = self.knowledge.setdefault("peer_target_claims", {})
         for pos, claim in list(peer_claims.items()):
-            if step - int(claim.get("step", step)) > TARGET_CLAIM_TTL:
+            claim_ttl = max(1, int(claim.get("ttl", TARGET_CLAIM_TTL)))
+            if step - int(claim.get("step", step)) > claim_ttl:
                 peer_claims.pop(pos, None)
 
         pending_handoffs = self.knowledge.setdefault("pending_handoffs", {})
@@ -354,20 +363,66 @@ class BaseRobotAgent(Agent):
 
         self._mark_congested_drop_cell(alert_pos, waste_type, zone or "unknown", sender=sender)
 
-    def _known_collectible_targets_count(self) -> int:
+    def _has_pending_collectible_handoff(self, knowledge: dict | None = None) -> bool:
+        source = self.knowledge if knowledge is None else knowledge
         collectible = self.collectible_type
-        if collectible is None:
-            return 0
-        visible = self.knowledge.get("visible_waste_positions", {}).get(collectible, [])
-        orphans = self.knowledge.get("orphan_waste_positions", {}).get(collectible, [])
-        return len(visible) + len(orphans)
-
-    def _has_pending_collectible_handoff(self) -> bool:
-        collectible = self.collectible_type
-        for offer in self.knowledge.get("pending_handoffs", {}).values():
+        for offer in source.get("pending_handoffs", {}).values():
             if offer.get("waste_type") == collectible:
                 return True
         return False
+
+    def _has_collectible_waste_in_zone_scope(self) -> bool:
+        if self.collectible_type is None:
+            return False
+
+        boundaries = getattr(self.model, "zone_boundaries", {})
+        z1_end = boundaries.get("z1", (0, 0))[1]
+        z2_start, z2_end = boundaries.get("z2", (z1_end + 1, z1_end + 1))
+
+        for waste in self.model.waste_agents():
+            if getattr(waste, "waste_type", None) != self.collectible_type:
+                continue
+            pos = getattr(waste, "pos", None)
+            if pos is None:
+                continue
+            x, _ = pos
+            if self.robot_type == "green":
+                if self.model.zone_for_pos(pos) == "z1":
+                    return True
+            elif self.robot_type == "yellow":
+                if x == z1_end or (z2_start <= x <= z2_end):
+                    return True
+            elif self.robot_type == "red":
+                return True
+        return False
+
+    def _has_collectible_in_same_color_cargo(self) -> bool:
+        collectible = self.collectible_type
+        if collectible is None:
+            return False
+
+        for robot in self.model.robot_agents():
+            if getattr(robot, "robot_type", None) != self.robot_type:
+                continue
+            carrying = getattr(robot, "carrying", [])
+            if any(item == collectible for item in carrying):
+                return True
+        return False
+
+    def _is_zone_clear_condition_met(self, knowledge: dict) -> bool:
+        if self.collectible_type is None:
+            return False
+        if len(knowledge.get("carrying_types", [])) > 0:
+            return False
+        if isinstance(knowledge.get("active_handoff"), dict):
+            return False
+        if self._has_pending_collectible_handoff(knowledge):
+            return False
+        if self._has_collectible_waste_in_zone_scope():
+            return False
+        if self._has_collectible_in_same_color_cargo():
+            return False
+        return True
 
     def _maybe_announce_zone_clear(self):
         if self.collectible_type is None:
@@ -378,13 +433,7 @@ class BaseRobotAgent(Agent):
             return
         if getattr(self.model, "zone_clear_announced", {}).get(self.robot_type, False):
             return
-        if self._known_collectible_targets_count() > 0:
-            return
-        if self._has_pending_collectible_handoff():
-            return
-        if self.cargo_count > 0:
-            return
-        if int(self.knowledge.get("patrol_cycles", 0)) < 1:
+        if not self._is_zone_clear_condition_met(self.knowledge):
             return
 
         step = int(self.knowledge.get("step", 0))
@@ -399,6 +448,9 @@ class BaseRobotAgent(Agent):
         self.knowledge["zone_clear_announced"] = True
         if hasattr(self.model, "zone_clear_announced"):
             self.model.zone_clear_announced[self.robot_type] = True
+        if hasattr(self.model, "zone_clear_message_steps"):
+            if self.model.zone_clear_message_steps.get(self.robot_type) is None:
+                self.model.zone_clear_message_steps[self.robot_type] = step
 
     def _handle_zone_clear(self, sender: str, content: dict):
         if content.get("robot_type") not in (None, self.robot_type):
@@ -407,7 +459,7 @@ class BaseRobotAgent(Agent):
         self.knowledge["active_handoff"] = None
 
     def _zone_clear_unblock_action(self, knowledge: dict, carrying: list[str]) -> dict | None:
-        if not self.knowledge.get("zone_clear_active"):
+        if not knowledge.get("zone_clear_active"):
             return None
         if len(carrying) != 0:
             return None
@@ -441,8 +493,15 @@ class BaseRobotAgent(Agent):
 
         return None
 
-    def _should_idle_due_zone_clear(self, carrying: list[str]) -> bool:
-        return bool(self.knowledge.get("zone_clear_active")) and len(carrying) == 0
+    def _should_idle_due_zone_clear(self, knowledge: dict, carrying: list[str]) -> bool:
+        if not knowledge.get("zone_clear_active"):
+            return False
+        if len(carrying) != 0:
+            return False
+        if self._is_zone_clear_condition_met(knowledge):
+            return True
+        knowledge["zone_clear_active"] = False
+        return False
 
     def _refresh_handoff_targets(self):
         candidates = []
@@ -491,9 +550,7 @@ class BaseRobotAgent(Agent):
             "eta": eta,
             "step": self.knowledge.get("step", 0),
         }
-        self._send_to(handoff_sender, MessagePerformative.COMMIT, content)
         self._broadcast(self._peer_names(), MessagePerformative.COMMIT, content)
-        self._broadcast_target_claim(handoff_pos, eta=eta, target_kind="handoff", force=True)
 
     def _claim_best_pending_handoff(self):
         if not self._can_pick_type(self.collectible_type):
@@ -559,6 +616,7 @@ class BaseRobotAgent(Agent):
             "agent": claimer,
             "eta": int(content.get("eta", 10**9)),
             "step": int(content.get("step", self.knowledge.get("step", 0))),
+            "ttl": max(HANDOFF_TTL, int(content.get("eta", HANDOFF_TTL)) + 2),
         }
 
         active_handoff = self.knowledge.get("active_handoff")
@@ -584,6 +642,11 @@ class BaseRobotAgent(Agent):
             "agent": claimer,
             "eta": int(content.get("eta", 10**9)),
             "step": int(content.get("step", self.knowledge.get("step", 0))),
+            "ttl": max(
+                TARGET_CLAIM_TTL,
+                int(content.get("ttl", TARGET_CLAIM_TTL)),
+                int(content.get("eta", TARGET_CLAIM_TTL)) + 2,
+            ),
         }
         current_claim = self.knowledge["peer_target_claims"].get(claim_pos)
         if current_claim is None:
@@ -646,19 +709,32 @@ class BaseRobotAgent(Agent):
         target_pos: tuple[int, int],
         eta: int | None = None,
         target_kind: str = "waste",
-        force: bool = False,
     ):
+        target_pos = self._normalize_pos(target_pos)
         if target_pos is None:
             return
 
-        eta = self._eta_to(target_pos) if eta is None else eta
+        if target_kind != "waste":
+            return
+
+        eta = self._eta_to(target_pos) if eta is None else int(eta)
+        if eta < TARGET_CLAIM_MIN_ETA:
+            return
+
+        peers = self._peer_names()
+        if not peers:
+            return
+
+        announced_targets = self.knowledge.setdefault("announced_target_claims", set())
+        if not isinstance(announced_targets, set):
+            announced_targets = {self._normalize_pos(pos) for pos in announced_targets}
+            announced_targets.discard(None)
+            self.knowledge["announced_target_claims"] = announced_targets
+        if target_pos in announced_targets:
+            return
+
         step = self.knowledge.get("step", 0)
-        claim_signature = (target_pos, eta, target_kind)
-        if not force:
-            last_signature = self.knowledge.get("last_target_claim")
-            last_step = int(self.knowledge.get("last_target_claim_step", -1))
-            if last_signature == claim_signature and (step - last_step) < 3:
-                return
+        claim_ttl = max(TARGET_CLAIM_TTL, eta + 2)
 
         content = {
             "kind": MSG_TARGET_CLAIM,
@@ -669,10 +745,10 @@ class BaseRobotAgent(Agent):
             "target_kind": target_kind,
             "waste_type": self.collectible_type,
             "step": step,
+            "ttl": claim_ttl,
         }
-        self._broadcast(self._peer_names(), MessagePerformative.PROPOSE, content)
-        self.knowledge["last_target_claim"] = claim_signature
-        self.knowledge["last_target_claim_step"] = step
+        self._broadcast(peers, MessagePerformative.PROPOSE, content)
+        announced_targets.add(target_pos)
 
     def _maybe_publish_target_claim(self):
         current_goal = self._normalize_pos(self.knowledge.get("current_goal"))
@@ -685,10 +761,10 @@ class BaseRobotAgent(Agent):
 
         active_handoff = self.knowledge.get("active_handoff")
         if isinstance(active_handoff, dict) and self._normalize_pos(active_handoff.get("pos")) == current_goal:
-            target_kind = "handoff"
-        else:
-            target_kind = "waste"
-        self._broadcast_target_claim(current_goal, target_kind=target_kind)
+            return
+        if current_goal not in self.knowledge.get("memory", {}):
+            return
+        self._broadcast_target_claim(current_goal, target_kind="waste")
 
     def _mark_target_found(self, found_pos: tuple[int, int]):
         active_handoff = self.knowledge.get("active_handoff")
@@ -849,7 +925,7 @@ class GreenRobotAgent(BaseRobotAgent):
         if unblock_action is not None:
             return unblock_action
 
-        if self._should_idle_due_zone_clear(carrying):
+        if self._should_idle_due_zone_clear(knowledge, carrying):
             return actions.idle()
 
         target_greens = list(visible.get("green", []))
@@ -939,7 +1015,7 @@ class YellowRobotAgent(BaseRobotAgent):
         if unblock_action is not None:
             return unblock_action
 
-        if self._should_idle_due_zone_clear(carrying):
+        if self._should_idle_due_zone_clear(knowledge, carrying):
             return actions.idle()
 
         target_yellows = list(visible.get("yellow", []))
@@ -1030,7 +1106,7 @@ class RedRobotAgent(BaseRobotAgent):
         if unblock_action is not None:
             return unblock_action
 
-        if self._should_idle_due_zone_clear(carrying):
+        if self._should_idle_due_zone_clear(knowledge, carrying):
             return actions.idle()
 
         if len(carrying) == 1 and carrying[0] == "red":

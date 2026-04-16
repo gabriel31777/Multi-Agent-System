@@ -40,6 +40,7 @@ class RobotMissionModel(Model):
         initial_yellow_waste: int = DEFAULT_PARAMS["initial_yellow_waste"],
         initial_red_waste: int = DEFAULT_PARAMS["initial_red_waste"],
         max_steps: int = DEFAULT_PARAMS["max_steps"],
+        enable_communication: bool = True,
         enable_propose_messages: bool = True,
         collect_agent_data: bool = True,
         seed: int | None = None,
@@ -49,6 +50,7 @@ class RobotMissionModel(Model):
         self.width = width
         self.height = height
         self.max_steps = max_steps
+        self.enable_communication = bool(enable_communication)
         self.enable_propose_messages = bool(enable_propose_messages)
         self.running = True
         self.disposed_waste = 0
@@ -57,6 +59,8 @@ class RobotMissionModel(Model):
         self.zone_boundaries = self._build_zones()
         self.east_targets = self._build_east_targets()
         self.zone_clear_announced = {"green": False, "yellow": False, "red": False}
+        self.zone_clear_message_steps = {"green": None, "yellow": None, "red": None}
+        self.zone_clear_steps = {"green": None, "yellow": None, "red": None}
         self.visit_counts = [[0 for _ in range(self.width)] for _ in range(self.height)]
         self.collect_agent_data = collect_agent_data
         self.message_service = self._configure_message_service()
@@ -65,6 +69,7 @@ class RobotMissionModel(Model):
         self._create_initial_wastes(initial_green_waste, initial_yellow_waste, initial_red_waste)
         self._create_robots(n_green_robots, n_yellow_robots, n_red_robots)
         self._record_robot_visits()
+        self._update_zone_clear_steps()
         self.datacollector = self._build_datacollector(collect_agent_data=collect_agent_data)
         self.datacollector.collect(self)
 
@@ -76,7 +81,8 @@ class RobotMissionModel(Model):
             service.set_model(self)
             service.set_instant_delivery(False)
         service.set_log_messages(False)
-        service.set_drop_propose_messages(not self.enable_propose_messages)
+        service.set_drop_all_messages(not self.enable_communication)
+        service.set_drop_propose_messages((not self.enable_communication) or (not self.enable_propose_messages))
         return service
 
     def _build_zones(self) -> dict[str, tuple[int, int]]:
@@ -235,6 +241,47 @@ class RobotMissionModel(Model):
             return 0.0
         return self.disposed_waste / self.total_distance
 
+    def _has_waste_in_robot_cargo(self, robot_type: str, waste_type: str) -> bool:
+        for robot in self.robot_agents():
+            if getattr(robot, "robot_type", None) != robot_type:
+                continue
+            if any(item == waste_type for item in getattr(robot, "carrying", [])):
+                return True
+        return False
+
+    def _zone_clear_status(self) -> dict[str, bool]:
+        z2_end = self.zone_boundaries["z2"][1]
+
+        green_in_scope = False
+        yellow_in_scope = False
+        red_in_scope = False
+
+        for waste in self.waste_agents():
+            pos = getattr(waste, "pos", None)
+            if pos is None:
+                continue
+            waste_type = getattr(waste, "waste_type", None)
+            x, _ = pos
+            if waste_type == "green" and self.zone_for_pos(pos) == "z1":
+                green_in_scope = True
+            elif waste_type == "yellow" and x < z2_end:
+                # Yellow is considered "zone clear" when only the z2->z3 border remains.
+                yellow_in_scope = True
+            elif waste_type == "red":
+                red_in_scope = True
+
+        return {
+            "green": (not green_in_scope) and (not self._has_waste_in_robot_cargo("green", "green")),
+            "yellow": (not yellow_in_scope) and (not self._has_waste_in_robot_cargo("yellow", "yellow")),
+            "red": (not red_in_scope) and (not self._has_waste_in_robot_cargo("red", "red")),
+        }
+
+    def _update_zone_clear_steps(self):
+        status = self._zone_clear_status()
+        for color, is_clear in status.items():
+            if is_clear and self.zone_clear_steps[color] is None:
+                self.zone_clear_steps[color] = int(self.steps)
+
     def _serialize_cell(self, pos: tuple[int, int]) -> dict:
         contents = self.grid.get_cell_list_contents([pos])
         wastes = [a for a in contents if isinstance(a, Waste)]
@@ -350,6 +397,7 @@ class RobotMissionModel(Model):
         self.message_service.dispatch_messages()
         self.agents.shuffle_do("step")
         self._record_robot_visits()
+        self._update_zone_clear_steps()
         self.datacollector.collect(self)
         if self.steps >= self.max_steps or (self.count_waste("green") == 0 and self.count_waste("yellow") == 0 and self.count_waste("red") == 0 and all(len(r.carrying) == 0 for r in self.robot_agents())):
             self.running = False

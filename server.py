@@ -19,6 +19,7 @@ from mesa.visualization.utils import update_counter
 show_green_lines = solara.reactive(True)
 show_yellow_lines = solara.reactive(True)
 show_red_lines = solara.reactive(True)
+enable_communication_ui = solara.reactive(True)
 enable_propose_messages_ui = solara.reactive(True)
 
 # Handle both package imports and direct execution
@@ -99,13 +100,24 @@ def MetricsSummary(model):
 def VisualizationControls(model):
     # Keep UI toggle aligned with model default at the beginning of each run.
     if getattr(model, "steps", 0) == 0:
+        comm_default = bool(getattr(model, "enable_communication", True))
+        if enable_communication_ui.value != comm_default:
+            enable_communication_ui.value = comm_default
         model_default = bool(getattr(model, "enable_propose_messages", True))
         if enable_propose_messages_ui.value != model_default:
             enable_propose_messages_ui.value = model_default
 
+    model.enable_communication = bool(enable_communication_ui.value)
+    model.enable_propose_messages = bool(enable_propose_messages_ui.value)
+
     message_service = getattr(model, "message_service", None)
-    if message_service is not None and hasattr(message_service, "set_drop_propose_messages"):
-        message_service.set_drop_propose_messages(not enable_propose_messages_ui.value)
+    if message_service is not None:
+        if hasattr(message_service, "set_drop_all_messages"):
+            message_service.set_drop_all_messages(not enable_communication_ui.value)
+        if hasattr(message_service, "set_drop_propose_messages"):
+            message_service.set_drop_propose_messages(
+                (not enable_communication_ui.value) or (not enable_propose_messages_ui.value)
+            )
 
     with solara.Sidebar():
         with solara.Card("Trajectory Visualization", margin=0, elevation=0):
@@ -113,6 +125,7 @@ def VisualizationControls(model):
             solara.Checkbox(label="Yellow Trajectories", value=show_yellow_lines)
             solara.Checkbox(label="Red Trajectories", value=show_red_lines)
         with solara.Card("Communication", margin=0, elevation=0):
+            solara.Checkbox(label="Enable communication", value=enable_communication_ui)
             solara.Checkbox(label="Enable PROPOSE messages", value=enable_propose_messages_ui)
             
 
@@ -512,6 +525,11 @@ model_params = {
         "type": "Checkbox",
         "value": False,
         "label": "Enable PROPOSE messages",
+    },
+    "enable_communication": {
+        "type": "Checkbox",
+        "value": True,
+        "label": "Enable communication",
     },
     "max_steps": DEFAULT_PARAMS["max_steps"],
 }

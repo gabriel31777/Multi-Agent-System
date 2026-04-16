@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 from collections import deque
+from collections import defaultdict
 
 
 class MessageService:
@@ -35,6 +36,10 @@ class MessageService:
             self.__message_history = deque(maxlen=500)
             self.__message_counter = 0
             self.__drop_propose_messages = False
+            self.__drop_all_messages = False
+            self.__message_stats_total = 0
+            self.__message_stats_performative = defaultdict(int)
+            self.__message_stats_kind = defaultdict(int)
 
     def set_model(self, model):
         """Bind service to a model instance."""
@@ -42,6 +47,9 @@ class MessageService:
         self.__messages_to_proceed.clear()
         self.__message_history.clear()
         self.__message_counter = 0
+        self.__message_stats_total = 0
+        self.__message_stats_performative.clear()
+        self.__message_stats_kind.clear()
 
     def set_log_messages(self, enabled: bool):
         """Enable/disable debug print of each message."""
@@ -59,9 +67,23 @@ class MessageService:
     def get_drop_propose_messages(self) -> bool:
         return self.__drop_propose_messages
 
+    def set_drop_all_messages(self, drop_messages: bool):
+        """Enable/disable dropping all outgoing messages."""
+        self.__drop_all_messages = bool(drop_messages)
+        if self.__drop_all_messages:
+            self.__messages_to_proceed.clear()
+
+    def get_drop_all_messages(self) -> bool:
+        return self.__drop_all_messages
+
     def _record_message(self, message):
         content = message.get_content() if hasattr(message, "get_content") else None
         kind = content.get("kind") if isinstance(content, dict) else None
+        perf = str(message.get_performative())
+        self.__message_stats_total += 1
+        self.__message_stats_performative[perf] += 1
+        if kind is not None:
+            self.__message_stats_kind[str(kind)] += 1
         if isinstance(content, dict):
             msg_step = content.get("step")
             msg_pos = content.get("pos", content.get("abandoned_pos"))
@@ -78,7 +100,7 @@ class MessageService:
                 "step": model_step if msg_step is None else msg_step,
                 "from": message.get_exp(),
                 "to": message.get_dest(),
-                "performative": str(message.get_performative()),
+                "performative": perf,
                 "kind": kind,
                 "pos": msg_pos,
                 "eta": msg_eta,
@@ -95,9 +117,18 @@ class MessageService:
             return []
         return history[-limit:]
 
+    def get_message_stats(self):
+        return {
+            "total": int(self.__message_stats_total),
+            "by_performative": dict(self.__message_stats_performative),
+            "by_kind": dict(self.__message_stats_kind),
+        }
+
     def send_message(self, message):
         """ Dispatch message if instant delivery active, otherwise add the message to proceed list.
         """
+        if self.__drop_all_messages:
+            return
         if self.__drop_propose_messages and str(message.get_performative()) == "PROPOSE":
             return
 

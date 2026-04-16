@@ -252,6 +252,12 @@ python run.py \
   --seed 42
 ```
 
+Disable all communication messages in single-run mode:
+
+```bash
+python run.py --disable-communication --seed 42
+```
+
 ### Interactive visualization (Solara)
 
 ```bash
@@ -261,7 +267,9 @@ solara run server.py
 
 ### Benchmark sweep (without Solara server)
 
-`run.py` also supports combinatorial benchmarks with repetitions:
+`run.py` supports combinatorial benchmarks with repetitions and automatically runs each scenario in **two modes**:
+- `with_comm` (full communication enabled)
+- `no_comm` (all messages disabled)
 
 ```bash
 python run.py --benchmark \
@@ -281,8 +289,8 @@ python run.py --benchmark \
 
 This command runs all parameter combinations (`Cartesian product`) and stores:
 - `benchmark_metadata.json` — benchmark setup (grid values, repetitions, seeds, total planned runs).
-- `benchmark_runs.csv` — one row per run with final metrics and run status.
-- `benchmark_scenarios.csv` — aggregated per-scenario metrics (mean/std/min/max).
+- `benchmark_runs.csv` — one row per run with final metrics, communication mode, message counts, and zone-clear steps.
+- `benchmark_scenarios.csv` — aggregated per-scenario/per-mode metrics (mean/std/min/max).
 - `benchmark_timeseries.csv` — per-step metrics from `DataCollector` (unless `--skip-timeseries` is used).
 
 Main optimization targets available in CSV output:
@@ -313,6 +321,9 @@ Generated images (PNG):
 - `parameter_impact_efficiency.png`
 - `scenario_frontier.png`
 - `timeseries_summary.png` (unless `--skip-timeseries`)
+- `communication_mode_comparison.png`
+- `zone_clear_steps_comparison.png`
+- `message_kind_breakdown.png`
 
 ---
 
