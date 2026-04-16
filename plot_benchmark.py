@@ -1,23 +1,19 @@
-"""Generate benchmark plots from headless run outputs.
+"""Grouped benchmark plotting for the robot mission using Pandas and Seaborn.
 
-Expected input files in the benchmark directory:
-- benchmark_runs.csv
-- benchmark_scenarios.csv
-- benchmark_timeseries.csv (optional)
+This script generates visualizations (Distributions and Parameter Impacts) 
+grouped by 'max_steps'.
 """
 
 from __future__ import annotations
 
 import argparse
-import csv
-import math
-from collections import defaultdict
 from pathlib import Path
 
 import matplotlib.pyplot as plt
-import numpy as np
+import pandas as pd
+import seaborn as sns
 
-PARAM_KEYS = [
+PARAM_IMPACT_KEYS = [
     "width",
     "height",
     "n_green_robots",
@@ -26,7 +22,6 @@ PARAM_KEYS = [
     "initial_green_waste",
     "initial_yellow_waste",
     "initial_red_waste",
-    "max_steps",
 ]
 
 MESSAGE_KIND_FIELDS = [
@@ -44,19 +39,18 @@ MODE_LABELS = {
 }
 
 
-def _to_float(value: str) -> float:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return float("nan")
+def plot_run_distributions(df: pd.DataFrame, output_dir: Path, dpi: int):
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 
+    sns.histplot(data=df, x="steps_executed", bins=20, color="#1f77b4", alpha=0.8, ax=axes[0])
+    axes[0].set_title("Distribution of Steps", fontsize=10)
 
-def _to_int(value: str) -> int | None:
-    try:
-        return int(float(value))
-    except (TypeError, ValueError):
-        return None
+    sns.histplot(data=df, x="final_efficiency", bins=20, color="#2ca02c", alpha=0.8, ax=axes[1])
+    axes[1].set_title("Distribution of Efficiency", fontsize=10)
 
+    for ax in axes:
+        ax.grid(True, alpha=0.2)
+        ax.tick_params(labelsize=8)
 
 def _load_csv_rows(path: Path) -> list[dict[str, str]]:
     with path.open("r", encoding="utf-8", newline="") as fp:
@@ -152,42 +146,45 @@ def plot_run_distributions(runs_rows: list[dict[str, str]], output_dir: Path, dp
 
     fig.suptitle("Benchmark Run-Level KPIs", fontsize=14)
     fig.tight_layout()
-    fig.savefig(output_dir / "run_level_distributions.png", dpi=dpi)
-    plt.close(fig)
-
-    fig, ax = plt.subplots(figsize=(10, 5))
-    ax.hist(elapsed[~np.isnan(elapsed)], bins=30, color="#9467bd", alpha=0.85)
-    _style_axis(ax, "Runtime per Run", "elapsed_seconds", "count")
-    fig.tight_layout()
-    fig.savefig(output_dir / "runtime_distribution.png", dpi=dpi)
+    fig.savefig(output_dir / "run_distributions.png", dpi=dpi)
     plt.close(fig)
 
 
 def plot_parameter_impact(
-    runs_rows: list[dict[str, str]],
+    df: pd.DataFrame,
     metric_key: str,
     title: str,
     ylabel: str,
     output_path: Path,
     dpi: int,
-    row_filter=None,
 ):
-    fig, axes = plt.subplots(3, 3, figsize=(15, 11))
+    fig, axes = plt.subplots(2, 4, figsize=(16, 8))
     axes_flat = axes.ravel()
 
-    for idx, param in enumerate(PARAM_KEYS):
+    for idx, param in enumerate(PARAM_IMPACT_KEYS):
         ax = axes_flat[idx]
-        xs, means, stds = _group_mean_std(runs_rows, param, metric_key, row_filter=row_filter)
-        if len(xs) == 0:
-            ax.text(0.5, 0.5, "no data", ha="center", va="center")
-            _style_axis(ax, param, param, ylabel)
-            continue
+        
+        sns.lineplot(
+            data=df, 
+            x=param, 
+            y=metric_key, 
+            errorbar='sd', 
+            marker="o", 
+            linewidth=1.5, 
+            color="#1f77b4", 
+            ax=ax
+        )
+        
+        ax.set_title(f"Impact of {param}", fontsize=10)
+        ax.set_xlabel(param, fontsize=9)
+        ax.set_ylabel(ylabel, fontsize=9)
+        ax.tick_params(labelsize=8)
+        ax.grid(True, alpha=0.2)
 
-        ax.plot(xs, means, marker="o", linewidth=1.7, color="#1f77b4")
-        lower = np.maximum(means - stds, 0.0)
-        upper = means + stds
-        ax.fill_between(xs, lower, upper, alpha=0.2, color="#1f77b4", label="mean +/- std")
-        _style_axis(ax, f"{param}", param, ylabel)
+        if metric_key == 'completed':
+            ax.set_ylim(0, 1)
+        else:
+            ax.set_ylim(bottom=0)
 
     fig.suptitle(title, fontsize=14)
     fig.tight_layout()
@@ -251,79 +248,18 @@ def plot_scenario_frontier(
     fig.savefig(output_path, dpi=dpi)
     plt.close(fig)
 
+def plot_proportion_sucessfull_runs(df: pd.DataFrame, output_dir: Path, dpi: int):
 
-def _quantile(values: list[float], q: float) -> float:
-    if not values:
-        return float("nan")
-    return float(np.quantile(np.array(values, dtype=float), q))
-
-
-def plot_timeseries_trends(
-    timeseries_path: Path,
-    runs_rows: list[dict[str, str]],
-    output_path: Path,
-    dpi: int,
-):
-    if not timeseries_path.exists():
-        return
-
-    valid_run_ids: set[int] = set()
-    for row in runs_rows:
-        if not _run_is_ok(row):
-            continue
-        run_id = _to_int(row.get("run_id", ""))
-        if run_id is not None:
-            valid_run_ids.add(run_id)
-    if not valid_run_ids:
-        return
-
-    remaining_by_step: dict[int, list[float]] = defaultdict(list)
-    disposed_by_step: dict[int, list[float]] = defaultdict(list)
-
-    with timeseries_path.open("r", encoding="utf-8", newline="") as fp:
-        reader = csv.DictReader(fp)
-        for row in reader:
-            run_id = _to_int(row.get("run_id", ""))
-            step = _to_int(row.get("step", ""))
-            remaining = _to_float(row.get("remaining_waste", ""))
-            disposed = _to_float(row.get("disposed_waste", ""))
-            if run_id is None or step is None:
-                continue
-            if run_id not in valid_run_ids:
-                continue
-            if not math.isnan(remaining):
-                remaining_by_step[step].append(remaining)
-            if not math.isnan(disposed):
-                disposed_by_step[step].append(disposed)
-
-    if not remaining_by_step:
-        return
-
-    steps = np.array(sorted(remaining_by_step.keys()), dtype=float)
-    rem_mean = np.array([np.mean(remaining_by_step[int(s)]) for s in steps], dtype=float)
-    rem_q10 = np.array([_quantile(remaining_by_step[int(s)], 0.10) for s in steps], dtype=float)
-    rem_q90 = np.array([_quantile(remaining_by_step[int(s)], 0.90) for s in steps], dtype=float)
-
-    disp_mean = np.array([np.mean(disposed_by_step.get(int(s), [float("nan")])) for s in steps], dtype=float)
-    disp_q10 = np.array([_quantile(disposed_by_step.get(int(s), []), 0.10) for s in steps], dtype=float)
-    disp_q90 = np.array([_quantile(disposed_by_step.get(int(s), []), 0.90) for s in steps], dtype=float)
-
-    fig, axes = plt.subplots(2, 1, figsize=(12, 9), sharex=True)
-
-    axes[0].plot(steps, rem_mean, color="#d62728", linewidth=1.8, label="mean")
-    axes[0].fill_between(steps, rem_q10, rem_q90, color="#d62728", alpha=0.2, label="p10-p90")
-    _style_axis(axes[0], "Remaining Waste Over Time", "", "remaining_waste")
-    axes[0].legend(loc="upper right")
-
-    axes[1].plot(steps, disp_mean, color="#2ca02c", linewidth=1.8, label="mean")
-    axes[1].fill_between(steps, disp_q10, disp_q90, color="#2ca02c", alpha=0.2, label="p10-p90")
-    _style_axis(axes[1], "Disposed Waste Over Time", "step", "disposed_waste")
-    axes[1].legend(loc="upper left")
-
-    fig.suptitle("Benchmark Time Series Summary (run-level aggregation)", fontsize=14)
-    fig.tight_layout()
-    fig.savefig(output_path, dpi=dpi)
+    fig, ax = plt.subplots()
+    labels = ['all waste collected', 'not all waste collected']
+    values = [(df['completed'] == 1).sum(), (df['completed'] == 0).sum()]
+    ax.pie(values, labels=labels, autopct='%1.1f%%', startangle=90)
+    ax.set_title("Proportion of successful collection of all waste", fontsize=10)
+    fig.savefig(output_dir / "proportion_successful_collection.png", dpi=dpi)
     plt.close(fig)
+    
+    
+    
 
 
 def plot_communication_mode_comparison(
@@ -505,63 +441,61 @@ def main():
     input_dir = Path(args.input_dir)
     output_dir = Path(args.output_dir) if args.output_dir else input_dir / "plots"
     output_dir.mkdir(parents=True, exist_ok=True)
-
-    runs_path = input_dir / "benchmark_runs.csv"
-    scenarios_path = input_dir / "benchmark_scenarios.csv"
-    timeseries_path = input_dir / "benchmark_timeseries.csv"
-
-    if not runs_path.exists():
-        raise FileNotFoundError(f"Missing file: {runs_path}")
-    if not scenarios_path.exists():
-        raise FileNotFoundError(f"Missing file: {scenarios_path}")
-
-    runs_rows = _load_csv_rows(runs_path)
-    scenario_rows = _load_csv_rows(scenarios_path)
-
-    plot_run_distributions(runs_rows, output_dir, dpi=args.dpi)
+    
+    plot_run_distributions(df, output_dir, dpi)
 
     plot_parameter_impact(
-        runs_rows,
+        df,
         metric_key="completed",
-        title="Parameter Impact on Completion Rate (run-level mean)",
+        title=f"Parameter Impact on Completion Rate{suffix}",
         ylabel="completion_rate",
-        output_path=output_dir / "parameter_impact_completion.png",
-        dpi=args.dpi,
-        row_filter=_run_is_ok,
+        output_path=output_dir / "impact_completion_rate.png",
+        dpi=dpi,
     )
+
     plot_parameter_impact(
-        runs_rows,
-        metric_key="steps_executed",
-        title="Parameter Impact on Steps (run-level mean)",
-        ylabel="steps_executed",
-        output_path=output_dir / "parameter_impact_steps.png",
-        dpi=args.dpi,
-        row_filter=_run_is_ok,
-    )
-    plot_parameter_impact(
-        runs_rows,
+        df,
         metric_key="final_efficiency",
-        title="Parameter Impact on Efficiency (run-level mean)",
+        title=f"Parameter Impact on Efficiency{suffix}",
         ylabel="final_efficiency",
-        output_path=output_dir / "parameter_impact_efficiency.png",
-        dpi=args.dpi,
-        row_filter=_run_is_ok,
+        output_path=output_dir / "impact_efficiency.png",
+        dpi=dpi,
     )
 
-    plot_scenario_frontier(
-        scenario_rows,
-        output_path=output_dir / "scenario_frontier.png",
-        dpi=args.dpi,
-        top_n_labels=args.top_scenario_labels,
+    plot_parameter_impact(
+        df,
+        metric_key="final_remaining_waste",
+        title=f"Parameter Impact on Remaining Waste{suffix}",
+        ylabel="final_remaining_waste",
+        output_path=output_dir / "impact_remaining_waste.png",
+        dpi=dpi,
     )
 
-    if not args.skip_timeseries:
-        plot_timeseries_trends(
-            timeseries_path=timeseries_path,
-            runs_rows=runs_rows,
-            output_path=output_dir / "timeseries_summary.png",
-            dpi=args.dpi,
-        )
+    plot_proportion_sucessfull_runs(df, output_dir, dpi)
+
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Grouped benchmark plotting using Pandas/Seaborn.")
+    parser.add_argument("--input-dir", default="benchmark_results", help="Input directory.")
+    parser.add_argument("--output-dir", default=None, help="Root for plots.")
+    parser.add_argument("--dpi", type=int, default=140, help="Resolution.")
+    args = parser.parse_args()
+
+    input_dir = Path(args.input_dir)
+    root_output = Path(args.output_dir) if args.output_dir else input_dir / "plots"
+    
+    runs_path = input_dir / "benchmark_runs.csv"
+    df = pd.read_csv(runs_path)
+    df = df[df['status'] == 'ok']
+    
+    unique_max_steps = sorted(df['max_steps'].dropna().unique())
+
+    for ms in unique_max_steps:
+        ms_dir = root_output / f"max_steps_{ms}"
+        print(f"Generating plots for duration={ms} steps in: {ms_dir}")
+        subset = df[df['max_steps'] == ms]
+        run_all_plots(subset, ms_dir, args.dpi, suffix=f" (max_steps={ms})")
 
     plot_communication_mode_comparison(
         runs_rows=runs_rows,
@@ -586,4 +520,5 @@ def main():
 
 
 if __name__ == "__main__":
+    sns.set_theme(style="whitegrid")
     main()
