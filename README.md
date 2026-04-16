@@ -20,6 +20,7 @@
 | `server.py` | Solara visualization server. |
 | `run.py` | Quick headless execution in script mode. |
 | `config.py` | Default parameters and visual constants. |
+| `communication/` | Communication package (mailbox, message types, performatives, and dispatch service). |
 
 ---
 
@@ -33,12 +34,7 @@ The grid (default **15 × 10**) is divided into three vertical zones of equal wi
 | `z2` (yellow) | 5 – 9 | 0.33 – 0.66 | Yellow, Red |
 | `z3` (red) | 10 – 14 | 0.66 – 1.00 | Red only |
 
-A single **Waste Disposal Zone** is placed at a random row on the rightmost column (x = 14).
-
-Waste is created at start and placed randomly within its matching zone:
-- **Green waste** → `z1`
-- **Yellow waste** → `z2`
-- **Red waste** → `z3`
+A single **Waste Disposal Zone** is placed at a random row on the rightmost column.
 
 ---
 
@@ -57,7 +53,7 @@ All robots share the same **perception → deliberation → action** loop define
 - **Target following:** movement towards a target uses Manhattan-distance minimization over free neighbouring cells.
 - **Memory use:** although perception is local, robots keep a persistent map (`knowledge["memory"]`) of previously seen tiles/waste.
 
-### Zig-zag patrol (lawnmower)
+### Zig-zag patrol
 
 When no actionable waste target is available, robots patrol using a precomputed `patrol_path`:
 - Built once per robot from allowed zone boundaries.
@@ -117,7 +113,7 @@ Yellow robots can enter `z1` to collect yellow waste produced by green robots at
 
 ## Orphan Waste Handling
 
-When the total quantity of waste of a given type is **odd**, one unit will be left without a pair and can never be transformed through the standard 2-into-1 rule. The system handles this via **forced promotion** (`transform_orphan`).
+When the total quantity of waste of a given type is **odd**, one unit will be left without a pair and can never be transformed through the standard 2-into-1 rule. We handle this via **forced promotion** (`transform_orphan`).
 
 ### Detection
 
@@ -145,6 +141,80 @@ This ensures the full pipeline never stalls: every waste unit, whether paired or
 ### Why not `drop(orphan=True)`?
 
 An earlier design dropped the lone item at the zone border with an `orphan` flag. This was broken because the downstream robot (e.g. yellow) only collects its own type (yellow) — a green orphan dropped at the border would sit there forever. `transform_orphan` avoids this by promoting the item in-cargo before delivery.
+
+---
+
+## Agent Communication Protocol
+
+Robots communicate through the `communication/` package (`Message`, `Mailbox`, `MessageService`, `MessagePerformative`).
+
+### Transport model
+
+- The mission uses `instant_delivery=False`.
+- At each tick, `model.step()` first calls `message_service.dispatch_messages()`, then agents execute their actions.
+- Practical effect: messages sent in step `t` are consumed in step `t+1`.
+
+### Performatives used
+
+| Performative | Role in this project |
+|---|---|
+| `PROPOSE` | Non-binding target reservation announcements (`target_claim`) |
+| `COMMIT` | Binding handoff reservation (`handoff_claim`) |
+| `INFORM_REF` | Event notifications (`handoff_ready`, `target_found`, `congestion_alert`) |
+
+Notes:
+- The enum also contains `ACCEPT`, `ASK_WHY`, `ARGUE`, `QUERY_REF`, but they are not used in the current mission logic.
+- Solara exposes `Enable PROPOSE messages` so you can disable only `PROPOSE` traffic in a run while keeping `COMMIT` and `INFORM_REF`.
+
+### Message types
+
+| `kind` | Performative | Sender -> Receivers | Intent | Typical payload |
+|---|---|---|---|---|
+| `handoff_ready` | `INFORM_REF` | Green -> all Yellow, Yellow -> all Red | Announces new transformed waste dropped on handoff border | `pos`, `waste_type`, `robot_type`, `step` |
+| `handoff_claim` | `COMMIT` | Claimer -> source robot + peers of same color | Commits pickup responsibility for a handoff target | `pos`, `eta`, `claimer`, `handoff_sender`, `waste_type`, `step` |
+| `target_claim` | `PROPOSE` | Robot -> peers of same color | Announces current target and ETA to reduce duplicate pursuit | `pos`, `eta`, `claimer`, `target_kind`, `waste_type`, `step` |
+| `target_found` | `INFORM_REF` | Robot -> peers of same color | Announces abandonment of previous target/handoff after finding a better local pick | `abandoned_pos`, `found_pos`, `finder`, `handoff_sender`, `waste_type`, `step` |
+| `congestion_alert` | `INFORM_REF` | Border producer -> peers of same color | Announces blocked border/drop cell to avoid repeated drops on the same cell | `pos`, `waste_type`, `zone`, `sender`, `step` |
+| `zone_clear` | `INFORM_REF` | First robot that completes a full patrol with no waste found -> peers of same color | Announces that the color-specific zone/workload is clear; receivers stop moving when empty | `robot_type`, `sender`, `step` |
+
+### Interaction protocol (Mermaid)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant G as Green_i
+    participant Gp as Green peers
+    participant Y as Yellow_j
+    participant Yp as Yellow peers
+    participant R as Red_k
+    participant Rp as Red peers
+
+    G->>Y: handoff_ready (INFORM_REF)\n{pos,waste_type=yellow,step}
+    Y->>G: handoff_claim (COMMIT)\n{pos,eta,claimer}
+    Y->>Yp: handoff_claim (COMMIT)
+
+    opt PROPOSE enabled
+        Y->>Yp: target_claim (PROPOSE)\n{pos,eta,target_kind}
+    end
+
+    opt Better local target found
+        Y->>Yp: target_found (INFORM_REF)\n{abandoned_pos,found_pos}
+    end
+
+    Y->>R: handoff_ready (INFORM_REF)\n{pos,waste_type=red,step}
+    R->>Y: handoff_claim (COMMIT)\n{pos,eta,claimer}
+    R->>Rp: handoff_claim (COMMIT)
+
+    opt Congested border/drop cell
+        G->>Gp: congestion_alert (INFORM_REF)\n{pos,waste_type=yellow,zone=z1}
+        Y->>Yp: congestion_alert (INFORM_REF)\n{pos,waste_type=red,zone=z2}
+    end
+
+    opt First full patrol with no collectible waste
+        Y->>Yp: zone_clear (INFORM_REF)\n{robot_type=yellow,sender,step}
+        note over Yp: Empty receivers switch to idle
+    end
+```
 
 ---
 
@@ -182,6 +252,12 @@ python run.py \
   --seed 42
 ```
 
+Disable all communication messages in single-run mode:
+
+```bash
+python run.py --disable-communication --seed 42
+```
+
 ### Interactive visualization (Solara)
 
 ```bash
@@ -191,7 +267,9 @@ solara run server.py
 
 ### Benchmark sweep (without Solara server)
 
-`run.py` also supports combinatorial benchmarks with repetitions:
+`run.py` supports combinatorial benchmarks with repetitions and automatically runs each scenario in **two modes**:
+- `with_comm` (full communication enabled)
+- `no_comm` (all messages disabled)
 
 ```bash
 python run.py --benchmark \
@@ -211,8 +289,8 @@ python run.py --benchmark \
 
 This command runs all parameter combinations (`Cartesian product`) and stores:
 - `benchmark_metadata.json` — benchmark setup (grid values, repetitions, seeds, total planned runs).
-- `benchmark_runs.csv` — one row per run with final metrics and run status.
-- `benchmark_scenarios.csv` — aggregated per-scenario metrics (mean/std/min/max).
+- `benchmark_runs.csv` — one row per run with final metrics, communication mode, message counts, and zone-clear steps.
+- `benchmark_scenarios.csv` — aggregated per-scenario/per-mode metrics (mean/std/min/max).
 - `benchmark_timeseries.csv` — per-step metrics from `DataCollector` (unless `--skip-timeseries` is used).
 
 Main optimization targets available in CSV output:
@@ -243,6 +321,9 @@ Generated images (PNG):
 - `parameter_impact_efficiency.png`
 - `scenario_frontier.png`
 - `timeseries_summary.png` (unless `--skip-timeseries`)
+- `communication_mode_comparison.png`
+- `zone_clear_steps_comparison.png`
+- `message_kind_breakdown.png`
 
 ---
 
@@ -259,13 +340,3 @@ Generated images (PNG):
 | Initial yellow waste | 12 |
 | Initial red waste | 12 |
 | Max steps | 300 |
-
----
-
-## Extension Points
-
-- Specialize `deliberate()` further (e.g. communication between agents).
-- Enhance `knowledge["memory"]` with decay or shared maps.
-- Change the exploration / transport policy for global efficiency optimization.
-- Add new metrics to the `DataCollector`.
-- Implement dynamic waste generation during the simulation.

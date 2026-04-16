@@ -61,6 +61,26 @@ METRIC_COLUMN_TO_KEY = {
     "Average cargo": "average_cargo",
 }
 
+COMMUNICATION_MODES = [
+    ("with_comm", True),
+    ("no_comm", False),
+]
+
+MESSAGE_PERFORMATIVE_KEYS = {
+    "PROPOSE": "messages_propose",
+    "COMMIT": "messages_commit",
+    "INFORM_REF": "messages_inform_ref",
+}
+
+MESSAGE_KIND_KEYS = {
+    "handoff_ready": "messages_handoff_ready",
+    "handoff_claim": "messages_handoff_claim",
+    "target_claim": "messages_target_claim",
+    "target_found": "messages_target_found",
+    "congestion_alert": "messages_congestion_alert",
+    "zone_clear": "messages_zone_clear",
+}
+
 
 def _parse_csv_int_list(raw: str, label: str, min_value: int = 0) -> list[int]:
     values: list[int] = []
@@ -92,6 +112,7 @@ def _build_single_params(args: argparse.Namespace) -> dict:
         "initial_yellow_waste": args.initial_yellow_waste,
         "initial_red_waste": args.initial_red_waste,
         "max_steps": args.max_steps,
+        "enable_communication": not args.disable_communication,
     }
 
 
@@ -147,6 +168,50 @@ def _run_once(params: dict, seed: int | None = None, collect_agent_data: bool = 
     return model, metrics, completed, termination_reason, elapsed_seconds
 
 
+def _message_metrics(model) -> dict:
+    result = {"messages_total": 0}
+    for key in MESSAGE_PERFORMATIVE_KEYS.values():
+        result[key] = 0
+    for key in MESSAGE_KIND_KEYS.values():
+        result[key] = 0
+
+    service = getattr(model, "message_service", None)
+    if service is None or not hasattr(service, "get_message_stats"):
+        return result
+
+    stats = service.get_message_stats() or {}
+    result["messages_total"] = int(stats.get("total", 0))
+    by_performative = stats.get("by_performative", {}) or {}
+    by_kind = stats.get("by_kind", {}) or {}
+    for perf_name, field in MESSAGE_PERFORMATIVE_KEYS.items():
+        result[field] = int(by_performative.get(perf_name, 0))
+    for kind_name, field in MESSAGE_KIND_KEYS.items():
+        result[field] = int(by_kind.get(kind_name, 0))
+    return result
+
+
+def _zone_clear_metrics(model) -> dict:
+    milestones = getattr(model, "zone_clear_steps", {}) or {}
+    messages = getattr(model, "zone_clear_message_steps", {}) or {}
+
+    def _fmt_step(raw):
+        if raw is None:
+            return -1
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return -1
+
+    return {
+        "zone_clear_step_green": _fmt_step(milestones.get("green")),
+        "zone_clear_step_yellow": _fmt_step(milestones.get("yellow")),
+        "zone_clear_step_red": _fmt_step(milestones.get("red")),
+        "zone_clear_message_step_green": _fmt_step(messages.get("green")),
+        "zone_clear_message_step_yellow": _fmt_step(messages.get("yellow")),
+        "zone_clear_message_step_red": _fmt_step(messages.get("red")),
+    }
+
+
 def _write_csv(path: Path, rows: list[dict], fieldnames: list[str]):
     with path.open("w", newline="", encoding="utf-8") as fp:
         writer = csv.DictWriter(fp, fieldnames=fieldnames)
@@ -165,17 +230,32 @@ def run_single(args: argparse.Namespace):
         "status": "ok",
         "params": params,
         "seed": args.seed,
+        "communication_mode": "no_comm" if args.disable_communication else "with_comm",
         "steps": model.steps,
         "termination_reason": termination_reason,
         "completed": completed,
         "elapsed_seconds": round(elapsed_seconds, 6),
         "metrics": metrics,
+        "message_metrics": _message_metrics(model),
+        "zone_clear_metrics": _zone_clear_metrics(model),
     }
     print(json.dumps(summary, indent=2))
 
 
-def _scenario_stats(rows: list[dict], metric_key: str) -> dict[str, float | int | None]:
-    values = [float(r[metric_key]) for r in rows]
+def _scenario_stats(
+    rows: list[dict],
+    metric_key: str,
+    ignore_negative: bool = False,
+) -> dict[str, float | int | None]:
+    values = []
+    for row in rows:
+        try:
+            value = float(row[metric_key])
+        except (TypeError, ValueError):
+            continue
+        if ignore_negative and value < 0:
+            continue
+        values.append(value)
     if not values:
         return {"mean": None, "std": None, "min": None, "max": None}
     std = pstdev(values) if len(values) > 1 else 0.0
@@ -201,7 +281,8 @@ def run_benchmark(args: argparse.Namespace):
         "repetitions": args.repetitions,
         "seed_base": args.seed_base,
         "total_scenarios": len(scenarios),
-        "total_runs_planned": len(scenarios) * args.repetitions,
+        "communication_modes": [mode for mode, _ in COMMUNICATION_MODES],
+        "total_runs_planned": len(scenarios) * args.repetitions * len(COMMUNICATION_MODES),
         "param_grid": param_grid,
     }
     metadata_path = output_dir / "benchmark_metadata.json"
@@ -210,7 +291,7 @@ def run_benchmark(args: argparse.Namespace):
     run_rows: list[dict] = []
     scenario_rows: list[dict] = []
 
-    total_runs = len(scenarios) * args.repetitions
+    total_runs = len(scenarios) * args.repetitions * len(COMMUNICATION_MODES)
     run_id = 0
     timeseries_writer = None
     timeseries_file = None
@@ -218,6 +299,8 @@ def run_benchmark(args: argparse.Namespace):
         timeseries_fieldnames = [
             "run_id",
             "scenario_id",
+            "communication_mode",
+            "enable_communication",
             "repetition",
             "seed",
             *PARAM_KEYS,
@@ -230,69 +313,84 @@ def run_benchmark(args: argparse.Namespace):
 
     try:
         for scenario_id, params in enumerate(scenarios, start=1):
-            scenario_run_rows: list[dict] = []
+            scenario_run_rows: dict[str, list[dict]] = {mode: [] for mode, _ in COMMUNICATION_MODES}
             for repetition in range(1, args.repetitions + 1):
-                run_id += 1
-                seed = (args.seed_base + run_id - 1) if args.seed_base is not None else None
-                if not args.quiet:
-                    print(
-                        f"[{run_id}/{total_runs}] scenario={scenario_id}/{len(scenarios)} "
-                        f"repetition={repetition} seed={seed} params={params}"
-                    )
+                base_seed = None
+                if args.seed_base is not None:
+                    seed_offset = (scenario_id - 1) * args.repetitions + (repetition - 1)
+                    base_seed = args.seed_base + seed_offset
 
-                try:
-                    model, metrics, completed, termination_reason, elapsed_seconds = _run_once(
-                        params,
-                        seed=seed,
-                        collect_agent_data=False,
-                    )
-                    run_row = {
-                        "run_id": run_id,
-                        "scenario_id": scenario_id,
-                        "repetition": repetition,
-                        "seed": seed,
-                        "status": "ok",
-                        "error": "",
-                        **params,
-                        "steps_executed": model.steps,
-                        "termination_reason": termination_reason,
-                        "completed": int(completed),
-                        "elapsed_seconds": elapsed_seconds,
-                        "final_green_waste": metrics["green_waste"],
-                        "final_yellow_waste": metrics["yellow_waste"],
-                        "final_red_waste": metrics["red_waste"],
-                        "final_disposed_waste": metrics["disposed_waste"],
-                        "final_remaining_waste": metrics["remaining_waste"],
-                        "final_total_distance": metrics["total_distance"],
-                        "final_efficiency": metrics["efficiency"],
-                        "final_active_robots": metrics["active_robots"],
-                        "final_average_cargo": metrics["average_cargo"],
-                    }
-                    run_rows.append(run_row)
-                    scenario_run_rows.append(run_row)
+                for communication_mode, communication_enabled in COMMUNICATION_MODES:
+                    run_id += 1
+                    seed = base_seed
+                    mode_params = dict(params)
+                    mode_params["enable_communication"] = communication_enabled
+                    if not args.quiet:
+                        print(
+                            f"[{run_id}/{total_runs}] scenario={scenario_id}/{len(scenarios)} "
+                            f"mode={communication_mode} repetition={repetition} seed={seed} params={params}"
+                        )
 
-                    if timeseries_writer is not None:
-                        df = model.datacollector.get_model_vars_dataframe()
-                        for step, (_, metric_row) in enumerate(df.iterrows()):
-                            timeseries_writer.writerow(
-                                {
-                                    "run_id": run_id,
-                                    "scenario_id": scenario_id,
-                                    "repetition": repetition,
-                                    "seed": seed,
-                                    **params,
-                                    "step": step,
-                                    **{
-                                        METRIC_COLUMN_TO_KEY[column]: metric_row[column]
-                                        for column in MODEL_METRIC_COLUMNS
-                                    },
-                                }
-                            )
-                except Exception as exc:
-                    run_rows.append(
-                        {
+                    try:
+                        model, metrics, completed, termination_reason, elapsed_seconds = _run_once(
+                            mode_params,
+                            seed=seed,
+                            collect_agent_data=False,
+                        )
+                        run_row = {
                             "run_id": run_id,
                             "scenario_id": scenario_id,
+                            "communication_mode": communication_mode,
+                            "enable_communication": int(communication_enabled),
+                            "repetition": repetition,
+                            "seed": seed,
+                            "status": "ok",
+                            "error": "",
+                            **params,
+                            "steps_executed": model.steps,
+                            "termination_reason": termination_reason,
+                            "completed": int(completed),
+                            "elapsed_seconds": elapsed_seconds,
+                            "final_green_waste": metrics["green_waste"],
+                            "final_yellow_waste": metrics["yellow_waste"],
+                            "final_red_waste": metrics["red_waste"],
+                            "final_disposed_waste": metrics["disposed_waste"],
+                            "final_remaining_waste": metrics["remaining_waste"],
+                            "final_total_distance": metrics["total_distance"],
+                            "final_efficiency": metrics["efficiency"],
+                            "final_active_robots": metrics["active_robots"],
+                            "final_average_cargo": metrics["average_cargo"],
+                            **_message_metrics(model),
+                            **_zone_clear_metrics(model),
+                        }
+                        run_rows.append(run_row)
+                        scenario_run_rows[communication_mode].append(run_row)
+
+                        if timeseries_writer is not None:
+                            df = model.datacollector.get_model_vars_dataframe()
+                            for step, (_, metric_row) in enumerate(df.iterrows()):
+                                timeseries_writer.writerow(
+                                    {
+                                        "run_id": run_id,
+                                        "scenario_id": scenario_id,
+                                        "communication_mode": communication_mode,
+                                        "enable_communication": int(communication_enabled),
+                                        "repetition": repetition,
+                                        "seed": seed,
+                                        **params,
+                                        "step": step,
+                                        **{
+                                            METRIC_COLUMN_TO_KEY[column]: metric_row[column]
+                                            for column in MODEL_METRIC_COLUMNS
+                                        },
+                                    }
+                                )
+                    except Exception as exc:
+                        error_row = {
+                            "run_id": run_id,
+                            "scenario_id": scenario_id,
+                            "communication_mode": communication_mode,
+                            "enable_communication": int(communication_enabled),
                             "repetition": repetition,
                             "seed": seed,
                             "status": "error",
@@ -312,45 +410,74 @@ def run_benchmark(args: argparse.Namespace):
                             "final_active_robots": "",
                             "final_average_cargo": "",
                         }
-                    )
-                    if not args.quiet:
-                        print(f"  -> ERROR in run {run_id}: {exc}")
+                        error_row.update({field: "" for field in MESSAGE_PERFORMATIVE_KEYS.values()})
+                        error_row.update({field: "" for field in MESSAGE_KIND_KEYS.values()})
+                        error_row.update(
+                            {
+                                "messages_total": "",
+                                "zone_clear_step_green": "",
+                                "zone_clear_step_yellow": "",
+                                "zone_clear_step_red": "",
+                                "zone_clear_message_step_green": "",
+                                "zone_clear_message_step_yellow": "",
+                                "zone_clear_message_step_red": "",
+                            }
+                        )
+                        run_rows.append(error_row)
+                        scenario_run_rows[communication_mode].append(error_row)
+                        if not args.quiet:
+                            print(f"  -> ERROR in run {run_id}: {exc}")
 
-            successful = [row for row in scenario_run_rows if row["status"] == "ok"]
-            scenario_row = {
-                "scenario_id": scenario_id,
-                **params,
-                "runs": args.repetitions,
-                "successful_runs": len(successful),
-                "completion_rate": (
-                    sum(row["completed"] for row in successful) / len(successful) if successful else 0.0
-                ),
-            }
-            steps_stats = _scenario_stats(successful, "steps_executed")
-            efficiency_stats = _scenario_stats(successful, "final_efficiency")
-            distance_stats = _scenario_stats(successful, "final_total_distance")
-            elapsed_stats = _scenario_stats(successful, "elapsed_seconds")
-            scenario_row.update(
-                {
-                    "steps_mean": steps_stats["mean"],
-                    "steps_std": steps_stats["std"],
-                    "steps_min": steps_stats["min"],
-                    "steps_max": steps_stats["max"],
-                    "efficiency_mean": efficiency_stats["mean"],
-                    "efficiency_std": efficiency_stats["std"],
-                    "efficiency_min": efficiency_stats["min"],
-                    "efficiency_max": efficiency_stats["max"],
-                    "distance_mean": distance_stats["mean"],
-                    "distance_std": distance_stats["std"],
-                    "distance_min": distance_stats["min"],
-                    "distance_max": distance_stats["max"],
-                    "elapsed_mean_seconds": elapsed_stats["mean"],
-                    "elapsed_std_seconds": elapsed_stats["std"],
-                    "elapsed_min_seconds": elapsed_stats["min"],
-                    "elapsed_max_seconds": elapsed_stats["max"],
+            for communication_mode, communication_enabled in COMMUNICATION_MODES:
+                successful = [row for row in scenario_run_rows[communication_mode] if row["status"] == "ok"]
+                scenario_row = {
+                    "scenario_id": scenario_id,
+                    "communication_mode": communication_mode,
+                    "enable_communication": int(communication_enabled),
+                    **params,
+                    "runs": args.repetitions,
+                    "successful_runs": len(successful),
+                    "completion_rate": (
+                        sum(row["completed"] for row in successful) / len(successful) if successful else 0.0
+                    ),
                 }
-            )
-            scenario_rows.append(scenario_row)
+                steps_stats = _scenario_stats(successful, "steps_executed")
+                efficiency_stats = _scenario_stats(successful, "final_efficiency")
+                distance_stats = _scenario_stats(successful, "final_total_distance")
+                elapsed_stats = _scenario_stats(successful, "elapsed_seconds")
+                message_stats = _scenario_stats(successful, "messages_total")
+                green_clear_stats = _scenario_stats(successful, "zone_clear_step_green", ignore_negative=True)
+                yellow_clear_stats = _scenario_stats(successful, "zone_clear_step_yellow", ignore_negative=True)
+                red_clear_stats = _scenario_stats(successful, "zone_clear_step_red", ignore_negative=True)
+                scenario_row.update(
+                    {
+                        "steps_mean": steps_stats["mean"],
+                        "steps_std": steps_stats["std"],
+                        "steps_min": steps_stats["min"],
+                        "steps_max": steps_stats["max"],
+                        "efficiency_mean": efficiency_stats["mean"],
+                        "efficiency_std": efficiency_stats["std"],
+                        "efficiency_min": efficiency_stats["min"],
+                        "efficiency_max": efficiency_stats["max"],
+                        "distance_mean": distance_stats["mean"],
+                        "distance_std": distance_stats["std"],
+                        "distance_min": distance_stats["min"],
+                        "distance_max": distance_stats["max"],
+                        "elapsed_mean_seconds": elapsed_stats["mean"],
+                        "elapsed_std_seconds": elapsed_stats["std"],
+                        "elapsed_min_seconds": elapsed_stats["min"],
+                        "elapsed_max_seconds": elapsed_stats["max"],
+                        "messages_total_mean": message_stats["mean"],
+                        "messages_total_std": message_stats["std"],
+                        "zone_clear_green_mean_step": green_clear_stats["mean"],
+                        "zone_clear_green_std_step": green_clear_stats["std"],
+                        "zone_clear_yellow_mean_step": yellow_clear_stats["mean"],
+                        "zone_clear_yellow_std_step": yellow_clear_stats["std"],
+                        "zone_clear_red_mean_step": red_clear_stats["mean"],
+                        "zone_clear_red_std_step": red_clear_stats["std"],
+                    }
+                )
+                scenario_rows.append(scenario_row)
     finally:
         if timeseries_file is not None:
             timeseries_file.close()
@@ -358,6 +485,8 @@ def run_benchmark(args: argparse.Namespace):
     run_fieldnames = [
         "run_id",
         "scenario_id",
+        "communication_mode",
+        "enable_communication",
         "repetition",
         "seed",
         "status",
@@ -376,11 +505,22 @@ def run_benchmark(args: argparse.Namespace):
         "final_efficiency",
         "final_active_robots",
         "final_average_cargo",
+        "messages_total",
+        *MESSAGE_PERFORMATIVE_KEYS.values(),
+        *MESSAGE_KIND_KEYS.values(),
+        "zone_clear_step_green",
+        "zone_clear_step_yellow",
+        "zone_clear_step_red",
+        "zone_clear_message_step_green",
+        "zone_clear_message_step_yellow",
+        "zone_clear_message_step_red",
     ]
     _write_csv(output_dir / "benchmark_runs.csv", run_rows, run_fieldnames)
 
     scenario_fieldnames = [
         "scenario_id",
+        "communication_mode",
+        "enable_communication",
         *PARAM_KEYS,
         "runs",
         "successful_runs",
@@ -401,6 +541,14 @@ def run_benchmark(args: argparse.Namespace):
         "elapsed_std_seconds",
         "elapsed_min_seconds",
         "elapsed_max_seconds",
+        "messages_total_mean",
+        "messages_total_std",
+        "zone_clear_green_mean_step",
+        "zone_clear_green_std_step",
+        "zone_clear_yellow_mean_step",
+        "zone_clear_yellow_std_step",
+        "zone_clear_red_mean_step",
+        "zone_clear_red_std_step",
     ]
     _write_csv(output_dir / "benchmark_scenarios.csv", scenario_rows, scenario_fieldnames)
 
@@ -456,6 +604,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--max-steps", dest="max_steps", type=int, default=DEFAULT_PARAMS["max_steps"])
     parser.add_argument("--seed", type=int, default=None, help="Seed for single-run mode.")
+    parser.add_argument(
+        "--disable-communication",
+        action="store_true",
+        help="Disable all agent messages (single-run mode).",
+    )
 
     parser.add_argument(
         "--widths",
