@@ -1013,11 +1013,6 @@ def main():
     scenarios_path = input_dir / "benchmark_scenarios.csv"
     timeseries_path = input_dir / "benchmark_timeseries.csv"
 
-    if not runs_path.exists():
-        raise FileNotFoundError(f"Missing file: {runs_path}")
-    if not scenarios_path.exists():
-        raise FileNotFoundError(f"Missing file: {scenarios_path}")
-
     runs_df = pd.read_csv(runs_path)
     scenarios_df = pd.read_csv(scenarios_path)
     if "status" in runs_df.columns:

@@ -163,10 +163,6 @@ class RobotMissionModel(Model):
             for _ in range(total):
                 agent = cls(self)
                 pos = self._random_free_pos_in_zone(start_zone)
-                if pos is None:
-                    raise ValueError(
-                        f"No free cell available to place robot '{cls.__name__}' in zone '{start_zone}'."
-                    )
                 self.grid.place_agent(agent, pos)
 
     def _record_visit(self, pos: tuple[int, int] | None):
@@ -258,15 +254,12 @@ class RobotMissionModel(Model):
         red_in_scope = False
 
         for waste in self.waste_agents():
-            pos = getattr(waste, "pos", None)
-            if pos is None:
-                continue
-            waste_type = getattr(waste, "waste_type", None)
+            pos = waste.pos
+            waste_type = waste.waste_type
             x, _ = pos
             if waste_type == "green" and self.zone_for_pos(pos) == "z1":
                 green_in_scope = True
             elif waste_type == "yellow" and (x == z1_end or (z2_start <= x <= z2_end)):
-                # Yellow is considered "zone clear" when only the z2->z3 border remains.
                 yellow_in_scope = True
             elif waste_type == "red":
                 red_in_scope = True

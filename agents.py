@@ -14,18 +14,11 @@ from collections import deque
 
 from mesa import Agent
 
-try:
-    from . import actions
-    from .communication.mailbox.Mailbox import Mailbox
-    from .communication.message.Message import Message
-    from .communication.message.MessagePerformative import MessagePerformative
-    from .communication.message.MessageService import MessageService
-except ImportError:
-    import actions
-    from communication.mailbox.Mailbox import Mailbox
-    from communication.message.Message import Message
-    from communication.message.MessagePerformative import MessagePerformative
-    from communication.message.MessageService import MessageService
+import actions
+from communication.mailbox.Mailbox import Mailbox
+from communication.message.Message import Message
+from communication.message.MessagePerformative import MessagePerformative
+from communication.message.MessageService import MessageService
 
 
 MSG_HANDOFF_READY = "handoff_ready"
@@ -229,7 +222,7 @@ class BaseRobotAgent(Agent):
         for robot in self.model.robot_agents():
             if robot is self:
                 continue
-            if getattr(robot, "robot_type", None) == selected_type and hasattr(robot, "get_name"):
+            if robot.robot_type == selected_type and hasattr(robot, "get_name"):
                 peers.append(robot.get_name())
         return peers
 
@@ -257,7 +250,7 @@ class BaseRobotAgent(Agent):
         return abs(self.pos[0] - pos[0]) + abs(self.pos[1] - pos[1])
 
     def _can_pick_type(self, waste_type: str | None) -> bool:
-        if waste_type is None or self.collectible_type is None or waste_type != self.collectible_type:
+        if waste_type != self.collectible_type:
             return False
         if self.cargo_count >= self.carry_capacity:
             return False
@@ -274,7 +267,7 @@ class BaseRobotAgent(Agent):
         unique_positions: list[tuple[int, int]] = []
         for pos in positions:
             normalized = self._normalize_pos(pos)
-            if normalized is None or normalized in unique_positions:
+            if normalized in unique_positions:
                 continue
             unique_positions.append(normalized)
 
@@ -319,8 +312,6 @@ class BaseRobotAgent(Agent):
         return any(w.get("waste_type") == waste_type for w in wastes)
 
     def _mark_congested_drop_cell(self, pos: tuple[int, int], waste_type: str, zone: str, sender: str | None = None):
-        if pos is None:
-            return
         self.knowledge["congested_drop_cells"][pos] = {
             "waste_type": waste_type,
             "zone": zone,

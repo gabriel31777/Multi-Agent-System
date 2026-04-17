@@ -148,10 +148,6 @@ The robot then proceeds with its normal delivery step: it carries the promoted i
 
 This ensures the full pipeline never stalls: every waste unit, whether paired or not, eventually reaches the disposal zone.
 
-### Why not `drop(orphan=True)`?
-
-An earlier design dropped the lone item at the zone border with an `orphan` flag. This was broken because the downstream robot (e.g. yellow) only collects its own type (yellow) — a green orphan dropped at the border would sit there forever. `transform_orphan` avoids this by promoting the item in-cargo before delivery.
-
 ---
 
 ## Agent Communication Protocol
@@ -455,6 +451,3 @@ Overall, communication is a net positive:
 - it achieves faster completion in most runs,
 - it substantially reduces motion cost,
 - and it significantly improves efficiency.
-
-In the context of **nuclear waste disposal**, these gains are especially important: fewer steps and shorter trajectories translate into **lower energy consumption, less mechanical wear, and lower operational risk** for the robots.  
-Future work should focus on adapting the communication protocol to scenario difficulty, particularly to avoid message explosion in hard cases while preserving coordination benefits.
