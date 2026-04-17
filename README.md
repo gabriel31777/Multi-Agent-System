@@ -1,11 +1,21 @@
-# Robot Mission MAS 2026
-## Self-organization of robots in a hostile environment
+# Self-organization of robots in a hostile environment
 
 - **Group number:** 22
 - **Members:**
   - Gabriel Anjos Moura
   - Vinícius da Mata e Mota
-  - Nicholas Oliveira Rodrigues Bragança
+  - Nicholas Estevão Pereira de Oliveira Rodrigues Bragança
+
+In this README, we present the robot behavior and communication strategies used for nuclear waste collection. We also ran benchmarks to compare performance with and without inter-robot communication. For results and analysis, see [Benchmark Results, Discussion, and Conclusion](#benchmark-results-discussion-and-conclusion).
+
+## Table of Contents
+
+- [Project Structure](#project-structure)
+- [Environment](#environment)
+- [Robot Strategy](#robot-strategy)
+- [Agent Communication Protocol](#agent-communication-protocol)
+- [How to Run](#how-to-run)
+- [Benchmark Results, Discussion, and Conclusion](#benchmark-results-discussion-and-conclusion)
 
 ---
 
@@ -20,7 +30,7 @@
 | `server.py` | Solara visualization server. |
 | `run.py` | Quick headless execution in script mode. |
 | `config.py` | Default parameters and visual constants. |
-| `communication/` | Communication package (mailbox, message types, performatives, and dispatch service). |
+| `communication/` | Communication package. |
 
 ---
 
@@ -160,22 +170,22 @@ Robots communicate through the `communication/` package (`Message`, `Mailbox`, `
 |---|---|
 | `PROPOSE` | Non-binding target reservation announcements (`target_claim`) |
 | `COMMIT` | Binding handoff reservation (`handoff_claim`) |
-| `INFORM_REF` | Event notifications (`handoff_ready`, `target_found`, `congestion_alert`) |
+| `INFORM_REF` | Event notifications (`handoff_ready`, `target_found`, `congestion_alert`, `zone_clear`) |
 
 Notes:
-- The enum also contains `ACCEPT`, `ASK_WHY`, `ARGUE`, `QUERY_REF`, but they are not used in the current mission logic.
 - Solara exposes `Enable PROPOSE messages` so you can disable only `PROPOSE` traffic in a run while keeping `COMMIT` and `INFORM_REF`.
+- `target_claim` is rate-limited by intent: it is sent once per target and only when ETA is not short (`eta >= 3`), reducing redundant chatter.
 
 ### Message types
 
 | `kind` | Performative | Sender -> Receivers | Intent | Typical payload |
 |---|---|---|---|---|
 | `handoff_ready` | `INFORM_REF` | Green -> all Yellow, Yellow -> all Red | Announces new transformed waste dropped on handoff border | `pos`, `waste_type`, `robot_type`, `step` |
-| `handoff_claim` | `COMMIT` | Claimer -> source robot + peers of same color | Commits pickup responsibility for a handoff target | `pos`, `eta`, `claimer`, `handoff_sender`, `waste_type`, `step` |
+| `handoff_claim` | `COMMIT` | Claimer -> peers of same color | Commits pickup responsibility for a handoff target | `pos`, `eta`, `claimer`, `handoff_sender`, `waste_type`, `step` |
 | `target_claim` | `PROPOSE` | Robot -> peers of same color | Announces current target and ETA to reduce duplicate pursuit | `pos`, `eta`, `claimer`, `target_kind`, `waste_type`, `step` |
 | `target_found` | `INFORM_REF` | Robot -> peers of same color | Announces abandonment of previous target/handoff after finding a better local pick | `abandoned_pos`, `found_pos`, `finder`, `handoff_sender`, `waste_type`, `step` |
 | `congestion_alert` | `INFORM_REF` | Border producer -> peers of same color | Announces blocked border/drop cell to avoid repeated drops on the same cell | `pos`, `waste_type`, `zone`, `sender`, `step` |
-| `zone_clear` | `INFORM_REF` | First Green/Yellow robot that completes a full patrol with no waste found -> peers of same color | Announces that the color-specific zone/workload is clear; receivers stop moving when empty (`red` zone-clear idle is disabled; `yellow` only declares after `green` is clear and no yellow robot is still carrying transformed output) | `robot_type`, `sender`, `step` |
+| `zone_clear` | `INFORM_REF` | First Green/Yellow robot satisfying local-clear conditions -> peers of same color | Announces that the color-specific workload is clear. Message is emitted at most once per color/run (`model.zone_clear_announced[color]`). Receivers only idle when empty and in safe (non-blocking) cells (`red` ignores zone-clear idling; yellow can announce/accept only after green clear is already recorded). | `robot_type`, `sender`, `step` |
 
 ### Interaction protocol (Mermaid)
 
@@ -190,7 +200,6 @@ sequenceDiagram
     participant Rp as Red peers
 
     G->>Y: handoff_ready (INFORM_REF)\n{pos,waste_type=yellow,step}
-    Y->>G: handoff_claim (COMMIT)\n{pos,eta,claimer}
     Y->>Yp: handoff_claim (COMMIT)
 
     opt PROPOSE enabled
@@ -202,7 +211,6 @@ sequenceDiagram
     end
 
     Y->>R: handoff_ready (INFORM_REF)\n{pos,waste_type=red,step}
-    R->>Y: handoff_claim (COMMIT)\n{pos,eta,claimer}
     R->>Rp: handoff_claim (COMMIT)
 
     opt Congested border/drop cell
@@ -210,10 +218,17 @@ sequenceDiagram
         Y->>Yp: congestion_alert (INFORM_REF)\n{pos,waste_type=red,zone=z2}
     end
 
-    opt First full patrol with no collectible waste
-        Y->>Yp: zone_clear (INFORM_REF)\n{robot_type=yellow,sender,step}
-        note over Yp: Empty receivers switch to idle
+    opt Green local-clear condition satisfied
+        G->>Gp: zone_clear (INFORM_REF)\n{robot_type=green,sender,step}
+        note over Gp: Empty receivers may safe-idle\n(unblock critical cells first)
     end
+
+    opt Yellow local-clear condition satisfied and green already clear
+        Y->>Yp: zone_clear (INFORM_REF)\n{robot_type=yellow,sender,step}
+        note over Yp: Empty receivers may safe-idle\n(unblock and park first)
+    end
+
+    note over R,Rp: Red robots ignore zone_clear\nand keep operating
 ```
 
 ---
@@ -236,12 +251,7 @@ The sidebar has per-type toggles:
 
 ### Headless simulation
 
-```bash
-conda activate project-mas-env
-python run.py
-```
-
-You can also run a single custom scenario directly from CLI:
+You can run a single custom scenario directly from CLI:
 
 ```bash
 python run.py \
@@ -255,13 +265,12 @@ python run.py \
 Disable all communication messages in single-run mode:
 
 ```bash
-python run.py --disable-communication --seed 42
+python run.py --disable-communication
 ```
 
 ### Interactive visualization (Solara)
 
 ```bash
-conda activate project-mas-env
 solara run server.py
 ```
 
@@ -315,15 +324,15 @@ Optional flags:
 
 Generated images (PNG):
 - `run_level_distributions.png`
-- `run_distributions.png` (legacy alias)
+- `run_distributions.png` 
 - `runtime_distribution.png`
 - `parameter_impact_completion.png`
-- `impact_completion_rate.png` (legacy alias)
+- `impact_completion_rate.png`
 - `parameter_impact_steps.png`
 - `parameter_impact_efficiency.png`
-- `impact_efficiency.png` (legacy alias)
+- `impact_efficiency.png` 
 - `parameter_impact_remaining_waste.png`
-- `impact_remaining_waste.png` (legacy alias)
+- `impact_remaining_waste.png` 
 - `proportion_successful_collection.png`
 - `scenario_frontier.png`
 - `timeseries_summary.png` (unless `--skip-timeseries`)
@@ -340,16 +349,112 @@ Generated images (PNG):
 
 ---
 
-## Default Parameters (`config.py`)
+## Benchmark Results, Discussion, and Conclusion
 
-| Parameter | Default |
-|---|---|
-| Grid width | 15 |
-| Grid height | 10 |
-| Green robots | 4 |
-| Yellow robots | 3 |
-| Red robots | 2 |
-| Initial green waste | 24 |
-| Initial yellow waste | 12 |
-| Initial red waste | 12 |
-| Max steps | 300 |
+In this section we present the benchmark we ran and analyse some of the results.
+
+This analysis uses `benchmark_results_comm`, with:
+- `256` scenarios (`2^8` parameter combinations),
+- `3` repetitions per scenario,
+- `2` communication modes (`with_comm`, `no_comm`),
+- total `1536` successful runs.
+
+### Overall metrics (`with_comm` vs `no_comm`)
+
+| Metric | With communication | No communication | Relative change |
+|---|---:|---:|---:|
+| Completion rate | 100.0% | 100.0% | = |
+| Mean steps | 319.37 | 345.66 | **-7.61%** |
+| Median steps | 292.0 | 319.5 | **-8.61%** |
+| P90 steps | 516.0 | 551.0 | **-6.35%** |
+| Mean total distance | 3215.04 | 5413.43 | **-40.61%** |
+| Mean efficiency | 0.014104 | 0.008923 | **+58.06%** |
+| Mean messages/run | 962.91 | 0.0 | +962.91 |
+
+Paired-run comparison (`same scenario + repetition + seed`, `n=768`):
+- `with_comm` faster in `509` runs.
+- `no_comm` faster in `251` runs.
+- tie in `8` runs.
+
+Generally the communication helped improve all the metrics overall. 
+
+### Figure analysis
+
+#### 1) Completion CDF ECDF of executed steps by mode
+
+![ECDF of steps by mode](benchmark_results_comm/plots/steps_ecdf_by_mode.png)
+
+Both modes reach 100% completion in this benchmark set. We've tested multiple times to ensure the communication techniques we implemented we're not resulting in deadlocks that prevented completion.
+We can see in the figura that the `with_comm` curve rises earlier, indicating earlier completion in most runs, but there's still a minority of runs where communication is slower.
+
+#### 2) Message composition vs communication gain
+
+![Message composition vs gain](benchmark_results_comm/plots/message_composition_vs_gain.png)
+
+In this figure we can see where the message trafic is concentrated:
+  - `congestion_alert` (~30.85%),
+  - `target_claim` (~28.02%),
+  - `handoff_claim` (~19.29%),
+  - `handoff_ready` (~16.98%).
+
+Higher message volume alone does not guarantee higher step gain, it depends on the scenario: amount of robots, waste, etc.
+- Scenario-level correlation between `messages_total` and `% step reduction` is weak-to-moderate negative (`r ≈ -0.235`), and stronger negative for `congestion_alert` (`r ≈ -0.303`), suggesting alerts are often a symptom of harder congestion-heavy scenarios.
+
+In the scenarios shown in the figure, communication reduced the number of steps to completion by approximately 25% to 35%.
+
+#### 3) Zone-clear steps comparison
+
+![Zone clear steps comparison](benchmark_results_comm/plots/zone_clear_steps_comparison.png)
+
+in this figure we can the that the mean zone-clear milestones occur earlier with communication:
+  - Green clear: `82.02` vs `104.48` (**21.5% earlier**)
+  - Yellow clear: `132.73` vs `179.88` (**26.2% earlier**)
+  - Red clear: `318.90` vs `344.55` (**7.45% earlier**)
+
+This is consistent with the desired implemented behavior of lower duplicate pursuit and better handoff coordination.
+
+#### 4) Time-series comparison by mode
+
+![Time-series mode comparison](benchmark_results_comm/plots/timeseries_mode_comparison.png)
+
+Here we can see the that mean remaining waste reaches key thresholds slightly earlier with communication:
+  - 50% remaining: step `70` vs `75`
+  - 25% remaining: step `157` vs `171`
+  - 5% remaining: step `536` vs `587`
+  - 0 remaining: step `793` vs `849`
+- Disposal is slightly slower very early (before ~200 steps), then overtakes and stays ahead in later stages.
+
+### Concrete run examples
+
+Best single-run gains (same scenario/seed across modes):
+- `scenario 141`, `seed 1421`: `205` vs `421` steps (**+51.31% reduction** with communication).
+  - Params: `30x10`, robots `G4/Y3/R4`, waste `48/12/12`.
+- `scenario 233`, `seed 1697`: `216` vs `380` steps (**+43.16%**).
+  - Params: `30x20`, robots `G8/Y3/R4`, waste `24/12/12`.
+
+Worst single-run degradations:
+- `scenario 188`, `seed 1562`: `335` vs `220` steps (**-52.27%**, communication slower).
+  - Params: `30x10`, robots `G8/Y6/R4`, waste `24/24/24`.
+- `scenario 251`, `seed 1751`: `457` vs `306` steps (**-49.35%**).
+  - Params: `30x20`, robots `G8/Y6/R4`, waste `24/24/12`.
+
+Scenario-mean extremes (averaging the 3 repetitions):
+- Best mean gain: `scenario 141`, **+34.93%**.
+- Worst mean gain: `scenario 157`, **-12.40%**.
+
+### Discussion
+
+- Communication improves **coordination quality** by reducing steps: the strongest global effect is on traveled distance and efficiency.
+- The dominant cost drivers are `congestion_alert` and `target_claim`. In hard scenarios, alerts can explode without proportional gain.
+- The current protocol is robust (no communication deadlocks): no incomplete runs were observed in this benchmark set.
+
+### Conclusion
+
+Overall, communication is a net positive:
+- it maintains the same completion reliability as the baseline,
+- it achieves faster completion in most runs,
+- it substantially reduces motion cost,
+- and it significantly improves efficiency.
+
+In the context of **nuclear waste disposal**, these gains are especially important: fewer steps and shorter trajectories translate into **lower energy consumption, less mechanical wear, and lower operational risk** for the robots.  
+Future work should focus on adapting the communication protocol to scenario difficulty, particularly to avoid message explosion in hard cases while preserving coordination benefits.
