@@ -136,23 +136,48 @@ def _build_scenarios(param_grid: dict[str, list[int]]) -> list[dict]:
     return [dict(zip(keys, values)) for values in combinations]
 
 
+def _to_native_scalar(value):
+    """Convert pandas/numpy scalar values to native Python scalars."""
+    if hasattr(value, "item"):
+        try:
+            return value.item()
+        except (TypeError, ValueError):
+            return value
+    return value
+
+
+def _to_json_safe(value):
+    if isinstance(value, dict):
+        return {str(k): _to_json_safe(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_to_json_safe(v) for v in value]
+    if isinstance(value, tuple):
+        return [_to_json_safe(v) for v in value]
+    if isinstance(value, set):
+        return [_to_json_safe(v) for v in sorted(value, key=repr)]
+    scalar = _to_native_scalar(value)
+    if isinstance(scalar, (str, int, float, bool)) or scalar is None:
+        return scalar
+    return str(scalar)
+
+
 def _get_last_metrics(model) -> dict:
     df = model.datacollector.get_model_vars_dataframe()
     if df.empty:
         return {
-            "green_waste": model.count_waste("green"),
-            "yellow_waste": model.count_waste("yellow"),
-            "red_waste": model.count_waste("red"),
-            "disposed_waste": model.disposed_waste,
-            "remaining_waste": model.count_remaining_waste(),
-            "total_distance": model.total_distance,
-            "efficiency": model.efficiency(),
-            "active_robots": model.count_robots(),
-            "average_cargo": model.average_cargo(),
+            "green_waste": _to_native_scalar(model.count_waste("green")),
+            "yellow_waste": _to_native_scalar(model.count_waste("yellow")),
+            "red_waste": _to_native_scalar(model.count_waste("red")),
+            "disposed_waste": _to_native_scalar(model.disposed_waste),
+            "remaining_waste": _to_native_scalar(model.count_remaining_waste()),
+            "total_distance": _to_native_scalar(model.total_distance),
+            "efficiency": _to_native_scalar(model.efficiency()),
+            "active_robots": _to_native_scalar(model.count_robots()),
+            "average_cargo": _to_native_scalar(model.average_cargo()),
         }
 
     row = df.iloc[-1]
-    return {METRIC_COLUMN_TO_KEY[column]: row[column] for column in MODEL_METRIC_COLUMNS}
+    return {METRIC_COLUMN_TO_KEY[column]: _to_native_scalar(row[column]) for column in MODEL_METRIC_COLUMNS}
 
 
 def _run_once(params: dict, seed: int | None = None, collect_agent_data: bool = True):
@@ -162,7 +187,7 @@ def _run_once(params: dict, seed: int | None = None, collect_agent_data: bool = 
         model.step()
     elapsed_seconds = time.perf_counter() - start_time
     metrics = _get_last_metrics(model)
-    completed = metrics["remaining_waste"] == 0
+    completed = bool(metrics["remaining_waste"] == 0)
     terminated_by_max_steps = model.steps >= params["max_steps"] and not completed
     termination_reason = "max_steps" if terminated_by_max_steps else "all_waste_collected"
     return model, metrics, completed, termination_reason, elapsed_seconds
@@ -239,7 +264,7 @@ def run_single(args: argparse.Namespace):
         "message_metrics": _message_metrics(model),
         "zone_clear_metrics": _zone_clear_metrics(model),
     }
-    print(json.dumps(summary, indent=2))
+    print(json.dumps(_to_json_safe(summary), indent=2))
 
 
 def _scenario_stats(
@@ -560,7 +585,7 @@ def run_benchmark(args: argparse.Namespace):
         "total_successful_runs": sum(1 for row in run_rows if row["status"] == "ok"),
         "timeseries_saved": not args.skip_timeseries,
     }
-    print(json.dumps(summary, indent=2))
+    print(json.dumps(_to_json_safe(summary), indent=2))
 
 
 def build_parser() -> argparse.ArgumentParser:

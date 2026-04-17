@@ -241,16 +241,17 @@ class RobotMissionModel(Model):
             return 0.0
         return self.disposed_waste / self.total_distance
 
-    def _has_waste_in_robot_cargo(self, robot_type: str, waste_type: str) -> bool:
+    def _has_waste_in_robot_cargo(self, robot_type: str | None, waste_type: str) -> bool:
         for robot in self.robot_agents():
-            if getattr(robot, "robot_type", None) != robot_type:
+            if robot_type is not None and getattr(robot, "robot_type", None) != robot_type:
                 continue
             if any(item == waste_type for item in getattr(robot, "carrying", [])):
                 return True
         return False
 
     def _zone_clear_status(self) -> dict[str, bool]:
-        z2_end = self.zone_boundaries["z2"][1]
+        z1_end = self.zone_boundaries["z1"][1]
+        z2_start, z2_end = self.zone_boundaries["z2"]
 
         green_in_scope = False
         yellow_in_scope = False
@@ -264,7 +265,7 @@ class RobotMissionModel(Model):
             x, _ = pos
             if waste_type == "green" and self.zone_for_pos(pos) == "z1":
                 green_in_scope = True
-            elif waste_type == "yellow" and x < z2_end:
+            elif waste_type == "yellow" and (x == z1_end or (z2_start <= x <= z2_end)):
                 # Yellow is considered "zone clear" when only the z2->z3 border remains.
                 yellow_in_scope = True
             elif waste_type == "red":
@@ -272,8 +273,8 @@ class RobotMissionModel(Model):
 
         return {
             "green": (not green_in_scope) and (not self._has_waste_in_robot_cargo("green", "green")),
-            "yellow": (not yellow_in_scope) and (not self._has_waste_in_robot_cargo("yellow", "yellow")),
-            "red": (not red_in_scope) and (not self._has_waste_in_robot_cargo("red", "red")),
+            "yellow": (not yellow_in_scope) and (not self._has_waste_in_robot_cargo(None, "yellow")),
+            "red": (not red_in_scope) and (not self._has_waste_in_robot_cargo(None, "red")),
         }
 
     def _update_zone_clear_steps(self):

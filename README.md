@@ -175,7 +175,7 @@ Notes:
 | `target_claim` | `PROPOSE` | Robot -> peers of same color | Announces current target and ETA to reduce duplicate pursuit | `pos`, `eta`, `claimer`, `target_kind`, `waste_type`, `step` |
 | `target_found` | `INFORM_REF` | Robot -> peers of same color | Announces abandonment of previous target/handoff after finding a better local pick | `abandoned_pos`, `found_pos`, `finder`, `handoff_sender`, `waste_type`, `step` |
 | `congestion_alert` | `INFORM_REF` | Border producer -> peers of same color | Announces blocked border/drop cell to avoid repeated drops on the same cell | `pos`, `waste_type`, `zone`, `sender`, `step` |
-| `zone_clear` | `INFORM_REF` | First robot that completes a full patrol with no waste found -> peers of same color | Announces that the color-specific zone/workload is clear; receivers stop moving when empty | `robot_type`, `sender`, `step` |
+| `zone_clear` | `INFORM_REF` | First Green/Yellow robot that completes a full patrol with no waste found -> peers of same color | Announces that the color-specific zone/workload is clear; receivers stop moving when empty (`red` zone-clear idle is disabled; `yellow` only declares after `green` is clear and no yellow robot is still carrying transformed output) | `robot_type`, `sender`, `step` |
 
 ### Interaction protocol (Mermaid)
 
@@ -281,7 +281,7 @@ python run.py --benchmark \
   --green-waste 24,48 \
   --yellow-waste 12,24 \
   --red-waste 12,24 \
-  --max-steps-grid 300,600 \
+  --max-steps-grid 1800 \
   --repetitions 3 \
   --seed-base 1000 \
   --output-dir benchmark_results
@@ -315,15 +315,28 @@ Optional flags:
 
 Generated images (PNG):
 - `run_level_distributions.png`
+- `run_distributions.png` (legacy alias)
 - `runtime_distribution.png`
 - `parameter_impact_completion.png`
+- `impact_completion_rate.png` (legacy alias)
 - `parameter_impact_steps.png`
 - `parameter_impact_efficiency.png`
+- `impact_efficiency.png` (legacy alias)
+- `parameter_impact_remaining_waste.png`
+- `impact_remaining_waste.png` (legacy alias)
+- `proportion_successful_collection.png`
 - `scenario_frontier.png`
 - `timeseries_summary.png` (unless `--skip-timeseries`)
 - `communication_mode_comparison.png`
 - `zone_clear_steps_comparison.png`
 - `message_kind_breakdown.png`
+- `steps_ecdf_by_mode.png`
+- `scenario_dumbbell_comparison.png`
+- `step_gain_heatmap.png`
+- `completion_cdf_by_mode.png`
+- `communication_cost_benefit.png`
+- `message_composition_vs_gain.png`
+- `timeseries_mode_comparison.png` (unless `--skip-timeseries`)
 
 ---
 

@@ -37,8 +37,10 @@ MSG_ZONE_CLEAR = "zone_clear"
 
 TARGET_CLAIM_TTL = 6
 HANDOFF_TTL = 12
-CONGESTION_TTL = 10
+CONGESTION_TTL = 6
 TARGET_CLAIM_MIN_ETA = 3
+CONGESTION_ALERT_MIN_INTERVAL = 10
+MEMORY_TARGET_TTL = 30
 
 
 class BaseRobotAgent(Agent):
@@ -57,6 +59,7 @@ class BaseRobotAgent(Agent):
         self._message_service = MessageService.get_instance()
         self.knowledge = {
             "memory": {},
+            "memory_steps": {},
             "history": deque(maxlen=25),
             "last_action": None,
             "last_percepts": None,
@@ -137,10 +140,18 @@ class BaseRobotAgent(Agent):
         self.knowledge["goal_type"] = None
         self.knowledge["target_found_event"] = None
         memory = self.knowledge.setdefault("memory", {})
+        memory_steps = self.knowledge.setdefault("memory_steps", {})
+        now_step = int(self.knowledge["step"])
         for pos, content in percepts.get("visible_tiles", {}).items():
             memory[pos] = content
+            memory_steps[pos] = now_step
             
-        for pos, tile in memory.items():
+        for pos, tile in list(memory.items()):
+            seen_step = int(memory_steps.get(pos, now_step))
+            if now_step - seen_step > MEMORY_TARGET_TTL:
+                memory.pop(pos, None)
+                memory_steps.pop(pos, None)
+                continue
             if tile.get("zone") in self.allowed_zones:
                 for w in tile.get("wastes", []):
                     wtype = w.get("waste_type")
@@ -208,6 +219,7 @@ class BaseRobotAgent(Agent):
         self.knowledge.setdefault("zone_clear_announced", False)
         self.knowledge.setdefault("patrol_rotations", 0)
         self.knowledge.setdefault("patrol_cycles", 0)
+        self.knowledge.setdefault("memory_steps", {})
         self._cleanup_comm_state()
         self._refresh_handoff_targets()
 
@@ -333,7 +345,7 @@ class BaseRobotAgent(Agent):
     def _broadcast_congestion_alert(self, pos: tuple[int, int], waste_type: str, zone: str):
         last_alert_step = self.knowledge.get("last_congestion_alerts", {}).get(pos)
         now_step = int(self.knowledge.get("step", 0))
-        if last_alert_step is not None and (now_step - int(last_alert_step)) < 2:
+        if last_alert_step is not None and (now_step - int(last_alert_step)) < CONGESTION_ALERT_MIN_INTERVAL:
             return
 
         self.knowledge.setdefault("last_congestion_alerts", {})[pos] = now_step
@@ -409,8 +421,27 @@ class BaseRobotAgent(Agent):
                 return True
         return False
 
+    def _has_output_in_same_color_cargo(self) -> bool:
+        output = self.output_type
+        if output is None:
+            return False
+
+        for robot in self.model.robot_agents():
+            if getattr(robot, "robot_type", None) != self.robot_type:
+                continue
+            carrying = getattr(robot, "carrying", [])
+            if any(item == output for item in carrying):
+                return True
+        return False
+
     def _is_zone_clear_condition_met(self, knowledge: dict) -> bool:
         if self.collectible_type is None:
+            return False
+        if self.robot_type == "yellow":
+            green_clear_step = getattr(self.model, "zone_clear_steps", {}).get("green")
+            if green_clear_step is None:
+                return False
+        if self._has_output_in_same_color_cargo():
             return False
         if len(knowledge.get("carrying_types", [])) > 0:
             return False
@@ -426,6 +457,11 @@ class BaseRobotAgent(Agent):
 
     def _maybe_announce_zone_clear(self):
         if self.collectible_type is None:
+            return
+        # Red zone-clear idling can deadlock late-stage disposal/collection
+        # (e.g., blocking key cells while yellow/red handoffs are still pending),
+        # so only green/yellow use the zone-clear message protocol.
+        if self.robot_type == "red":
             return
         if self.knowledge.get("zone_clear_active"):
             return
@@ -455,6 +491,12 @@ class BaseRobotAgent(Agent):
     def _handle_zone_clear(self, sender: str, content: dict):
         if content.get("robot_type") not in (None, self.robot_type):
             return
+        if self.robot_type == "red":
+            return
+        if self.robot_type == "yellow":
+            green_clear_step = getattr(self.model, "zone_clear_steps", {}).get("green")
+            if green_clear_step is None:
+                return
         self.knowledge["zone_clear_active"] = True
         self.knowledge["active_handoff"] = None
 
@@ -463,42 +505,74 @@ class BaseRobotAgent(Agent):
             return None
         if len(carrying) != 0:
             return None
-        if self.output_type is None:
-            return None
-
         handoff_zone = self._drop_handoff_zone()
-        if handoff_zone is None:
-            return None
 
         pos = knowledge.get("pos")
-        east_targets = knowledge.get("east_targets", {}).get(handoff_zone, [])
-        if pos not in east_targets:
-            return None
-
         same_cell = knowledge.get("current_tile_wastes", [])
-        has_processed_waste = any(w.get("waste_type") == self.output_type for w in same_cell)
-        if not has_processed_waste:
+        east_targets = knowledge.get("east_targets", {}).get(handoff_zone, []) if handoff_zone else []
+        on_handoff_border = pos in east_targets
+        on_disposal = pos == knowledge.get("disposal_pos")
+        on_waste = len(same_cell) > 0
+
+        def _escape_from_cell() -> dict | None:
+            retreat_target = (max(0, pos[0] - 1), pos[1])
+            retreat_action = BaseRobotAgent._action_towards(knowledge, retreat_target, goal_type="unblock")
+            if retreat_action.get("type") != "idle":
+                return retreat_action
+
+            random_target = knowledge.get("random_move", pos)
+            random_action = BaseRobotAgent._action_towards(knowledge, random_target, goal_type="unblock")
+            if random_action.get("type") != "idle":
+                return random_action
             return None
 
-        # On zone clear, free handoff border cells if standing over processed waste.
-        retreat_target = (max(0, pos[0] - 1), pos[1])
-        retreat_action = BaseRobotAgent._action_towards(knowledge, retreat_target, goal_type="unblock")
-        if retreat_action.get("type") != "idle":
-            return retreat_action
+        # Never stay still on waste/critical cells during zone clear.
+        if on_waste or on_handoff_border or on_disposal:
+            escape_action = _escape_from_cell()
+            if escape_action is not None:
+                return escape_action
 
-        random_target = knowledge.get("random_move", pos)
-        random_action = BaseRobotAgent._action_towards(knowledge, random_target, goal_type="unblock")
-        if random_action.get("type") != "idle":
-            return random_action
+        # After unblocking, move to a safe parking cell and only then idle.
+        if self.robot_type in {"green", "yellow"}:
+            safe_x = self.model.zone_boundaries.get("z1", (0, 0))[0]
+            peer_names = sorted(
+                [
+                    robot.get_name()
+                    for robot in self.model.robot_agents()
+                    if getattr(robot, "robot_type", None) == self.robot_type and hasattr(robot, "get_name")
+                ]
+            )
+            try:
+                slot_idx = peer_names.index(self.get_name())
+            except ValueError:
+                slot_idx = int(self.unique_id)
+            safe_target = (safe_x, slot_idx % self.model.height)
+            if pos != safe_target:
+                park_action = BaseRobotAgent._action_towards(knowledge, safe_target, goal_type="zone_clear_park")
+                if park_action.get("type") != "idle":
+                    return park_action
 
         return None
 
     def _should_idle_due_zone_clear(self, knowledge: dict, carrying: list[str]) -> bool:
+        if self.robot_type == "red":
+            knowledge["zone_clear_active"] = False
+            return False
         if not knowledge.get("zone_clear_active"):
             return False
         if len(carrying) != 0:
             return False
         if self._is_zone_clear_condition_met(knowledge):
+            # Do not idle if this would block disposal/handoffs or a waste cell.
+            handoff_zone = self._drop_handoff_zone()
+            pos = knowledge.get("pos")
+            east_targets = knowledge.get("east_targets", {}).get(handoff_zone, []) if handoff_zone else []
+            if pos in east_targets:
+                return False
+            if pos == knowledge.get("disposal_pos"):
+                return False
+            if len(knowledge.get("current_tile_wastes", [])) > 0:
+                return False
             return True
         knowledge["zone_clear_active"] = False
         return False
