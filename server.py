@@ -98,7 +98,7 @@ def MetricsSummary(model):
 
 @solara.component
 def VisualizationControls(model):
-    # Keep UI toggle aligned with model default at the beginning of each run.
+    # match UI toggle with model default
     if getattr(model, "steps", 0) == 0:
         comm_default = bool(getattr(model, "enable_communication", True))
         if enable_communication_ui.value != comm_default:
@@ -139,7 +139,7 @@ def GridZones(model):
     width = model.grid.width
     height = model.grid.height
 
-    # Desenha o fundo colorido de cada célula
+    # draw the colored background for each cell
     for x in range(width):
         for y in range(height):
             zone_color = model.get_zone_color((x, y))
@@ -156,7 +156,7 @@ def GridZones(model):
             )
             ax.add_patch(rect)
 
-    # Desenha os agentes por cima
+    # draw agents on top
     for agent in model.agents:
         pos = getattr(agent, "pos", None)
         if pos is None:
@@ -221,7 +221,7 @@ def GridZones(model):
     ax.set_yticks(range(height))
     ax.set_aspect("equal")
 
-    # Grid pontilhado
+    # dotted grid
     ax.grid(True, linestyle=":", color="gray", alpha=0.8)
 
     solara.FigureMatplotlib(fig)

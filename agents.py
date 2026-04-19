@@ -449,9 +449,7 @@ class BaseRobotAgent(Agent):
     def _maybe_announce_zone_clear(self):
         if self.collectible_type is None:
             return
-        # Red zone-clear idling can deadlock late-stage disposal/collection
-        # (e.g., blocking key cells while yellow/red handoffs are still pending),
-        # so only green/yellow use the zone-clear message protocol.
+        # only green and yellow use zone_clear, red can cause deadlocks
         if self.robot_type == "red":
             return
         if self.knowledge.get("zone_clear_active"):
@@ -517,13 +515,13 @@ class BaseRobotAgent(Agent):
                 return random_action
             return None
 
-        # Never stay still on waste/critical cells during zone clear.
+        # don't stay on critical cells during clear
         if on_waste or on_handoff_border or on_disposal:
             escape_action = _escape_from_cell()
             if escape_action is not None:
                 return escape_action
 
-        # After unblocking, move to a safe parking cell and only then idle.
+        # park somewhere safe before idling
         if self.robot_type in {"green", "yellow"}:
             safe_x = self.model.zone_boundaries.get("z1", (0, 0))[0]
             peer_names = sorted(
@@ -554,7 +552,7 @@ class BaseRobotAgent(Agent):
         if len(carrying) != 0:
             return False
         if self._is_zone_clear_condition_met(knowledge):
-            # Do not idle if this would block disposal/handoffs or a waste cell.
+            # don't idle if it blocks the way
             handoff_zone = self._drop_handoff_zone()
             pos = knowledge.get("pos")
             east_targets = knowledge.get("east_targets", {}).get(handoff_zone, []) if handoff_zone else []
@@ -995,8 +993,7 @@ class GreenRobotAgent(BaseRobotAgent):
 
         target_greens = list(visible.get("green", []))
         orphan_greens = list(orphans.get("green", []))
-        # Pick orphans if: already carrying 1 (want to pair), OR no non-orphan greens exist
-        # (meaning the orphan is the last one and will never get a pair).
+        # only pick orphans if we need a pair, or if there's no other greens left
         no_more_greens = len(target_greens) == 0
         can_pick_orphans = len(carrying) == 1 or no_more_greens
         if can_pick_orphans:
@@ -1028,11 +1025,10 @@ class GreenRobotAgent(BaseRobotAgent):
             return BaseRobotAgent._action_towards(knowledge, target_drop)
 
         if len(carrying) == 1 and carrying[0] == "green" and not target_greens:
-            # No pair possible: force-promote the single green → yellow so the
-            # yellow robot can carry it forward without leaving dead waste.
+            # no pair possible, just promote to yellow
             return actions.transform_orphan()
 
-        # After dropping yellow at the handoff point, vacate this cell so yellow robots can enter.
+        # leave the cell after dropping so yellow can enter
         if pos in east_targets and not carrying:
             yellow_here = [w for w in same_cell if w["waste_type"] == "yellow"]
             if yellow_here:
@@ -1085,7 +1081,7 @@ class YellowRobotAgent(BaseRobotAgent):
 
         target_yellows = list(visible.get("yellow", []))
         orphan_yellows = list(orphans.get("yellow", []))
-        # Pick orphans if: already carrying 1 (want to pair), OR no non-orphan yellows exist.
+        # pick orphan if we have 1 already or there are no normal yellows
         no_more_yellows = len(target_yellows) == 0
         can_pick_orphans = len(carrying) == 1 or no_more_yellows
         if can_pick_orphans:
@@ -1117,8 +1113,7 @@ class YellowRobotAgent(BaseRobotAgent):
             return BaseRobotAgent._action_towards(knowledge, target_drop)
 
         if len(carrying) == 1 and carrying[0] == "yellow" and not target_yellows:
-            # No pair possible: force-promote the single yellow to red so the
-            # red robot can pick it up and dispose it.
+            # force promote to red if no pair is possible
             return actions.transform_orphan()
 
         if len(carrying) >= 2 and all(t == "yellow" for t in carrying):

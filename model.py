@@ -222,17 +222,13 @@ class RobotMissionModel(Model):
         return sum(len(r.carrying) for r in robots) / len(robots)
 
     def count_remaining_waste(self) -> int:
-        """
-        Counts all waste items that still exist in the system:
-        - waste agents currently on the grid
-        - waste units currently being carried by robots
-        """
+        # count all wastes on the grid and carried
         grid_waste = len(self.waste_agents())
         carried_waste = sum(len(robot.carrying) for robot in self.robot_agents())
         return grid_waste + carried_waste
 
     def efficiency(self) -> float:
-        """Disposed waste per unit of travelled distance."""
+        # disposed waste per unit of travelled distance
         if self.total_distance == 0:
             return 0.0
         return self.disposed_waste / self.total_distance
@@ -371,7 +367,7 @@ class RobotMissionModel(Model):
                 self.grid.place_agent(w, agent.pos)
 
         elif action_type == "transform_orphan":
-            # Force-transform a single item when no pair can be formed.
+            # just promote it if there's no pair
             if (
                 agent.output_type is not None
                 and len(agent.carrying) == 1
