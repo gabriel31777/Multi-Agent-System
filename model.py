@@ -16,16 +16,10 @@ from mesa import Model
 from mesa.datacollection import DataCollector
 from mesa.space import MultiGrid
 
-try:
-    from .agents import GreenRobotAgent, RedRobotAgent, YellowRobotAgent
-    from .communication.message.MessageService import MessageService
-    from .config import DEFAULT_PARAMS, RADIOACTIVITY_BOUNDS
-    from .objects import RadioactivityCell, Waste, WasteDisposalZone
-except ImportError:
-    from agents import GreenRobotAgent, RedRobotAgent, YellowRobotAgent
-    from communication.message.MessageService import MessageService
-    from config import DEFAULT_PARAMS, RADIOACTIVITY_BOUNDS
-    from objects import RadioactivityCell, Waste, WasteDisposalZone
+from agents import GreenRobotAgent, RedRobotAgent, YellowRobotAgent
+from communication.message.MessageService import MessageService
+from config import DEFAULT_PARAMS, RADIOACTIVITY_BOUNDS
+from objects import RadioactivityCell, Waste, WasteDisposalZone
 
 
 class RobotMissionModel(Model):

@@ -521,7 +521,7 @@ class BaseRobotAgent(Agent):
             if escape_action is not None:
                 return escape_action
 
-        # park somewhere safe before idling
+        # park somewhere safe before idling at the end
         if self.robot_type in {"green", "yellow"}:
             safe_x = self.model.zone_boundaries.get("z1", (0, 0))[0]
             peer_names = sorted(
